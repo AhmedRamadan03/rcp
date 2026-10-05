@@ -52,18 +52,27 @@ class RiskController extends Controller
     public function summary(Request $request)
     {
         $user = auth()->user();
-        $claims = Claim::visibleTo($user);
+        $stats = Claim::visibleTo($user)
+            ->selectRaw('COUNT(*) as total_claims')
+            ->selectRaw('SUM(CASE WHEN risk_score >= 70 THEN 1 ELSE 0 END) as high_risk')
+            ->selectRaw('SUM(CASE WHEN risk_score >= 30 AND risk_score < 70 THEN 1 ELSE 0 END) as medium_risk')
+            ->selectRaw('SUM(CASE WHEN risk_score < 30 THEN 1 ELSE 0 END) as low_risk')
+            ->selectRaw('COALESCE(AVG(risk_score), 0) as avg_score')
+            ->first();
+
+        $totalClaims = (int) ($stats->total_claims ?? 0);
+        $highRisk = (int) ($stats->high_risk ?? 0);
 
         return response()->json([
             'success' => true,
             'message' => 'ملخص المخاطر',
             'data' => [
-                'total_claims' => $claims->count(),
-                'high_risk' => (clone $claims)->highRisk()->count(),
-                'medium_risk' => (clone $claims)->mediumRisk()->count(),
-                'low_risk' => (clone $claims)->lowRisk()->count(),
-                'avg_score' => round((clone $claims)->avg('risk_score') ?? 0, 2),
-                'high_risk_percentage' => $claims->count() > 0 ? round(((clone $claims)->highRisk()->count() / $claims->count()) * 100, 2) : 0,
+                'total_claims' => $totalClaims,
+                'high_risk' => $highRisk,
+                'medium_risk' => (int) ($stats->medium_risk ?? 0),
+                'low_risk' => (int) ($stats->low_risk ?? 0),
+                'avg_score' => round((float) ($stats->avg_score ?? 0), 2),
+                'high_risk_percentage' => $totalClaims > 0 ? round(($highRisk / $totalClaims) * 100, 2) : 0,
             ]
         ]);
     }
