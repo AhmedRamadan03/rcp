@@ -20,7 +20,7 @@ class RiskCalculationService
         'client_risk' => 5,
     ];
 
-    public function calculate(Claim $claim, ?User $calculatedBy = null): array
+    public function calculate(Claim $claim, ?User $calculatedBy = null, string $trigger = 'updated'): array
     {
         $factors = [];
         $score = 0;
@@ -73,7 +73,7 @@ class RiskCalculationService
             'claim_id' => $claim->id,
             'risk_score' => $finalScore,
             'risk_factors' => $factors,
-            'trigger' => 'updated',
+            'trigger' => $trigger,
             'calculated_by' => $calculatedBy?->id,
         ]);
 
@@ -106,7 +106,11 @@ class RiskCalculationService
     private function calculateAccidentAgeScore(Claim $claim): int
     {
         if (!$claim->accident_date) return 50;
-        $months = Carbon::parse($claim->accident_date)->diffInMonths(now());
+
+        $accidentDate = Carbon::parse($claim->accident_date);
+        if ($accidentDate->isFuture()) return 50;
+
+        $months = $accidentDate->diffInMonths(now());
         if ($months > 24) return 90;
         if ($months > 12) return 70;
         if ($months > 6) return 40;
@@ -116,12 +120,18 @@ class RiskCalculationService
 
     private function calculateHistoryScore(Claim $claim): int
     {
-        $previous = Claim::where('debtor_nid', $claim->debtor_nid)
-            ->where('id', '!=', $claim->id)
-            ->count();
-        $rejected = Claim::where('debtor_nid', $claim->debtor_nid)
-            ->whereIn('status', ['rejected', 'cancelled', 'closed', 'manaual_collected'])
-            ->count();
+        if (!$claim->debtor_nid) return 0;
+
+        $stats = Claim::query()
+            ->where('debtor_nid', $claim->debtor_nid)
+            ->whereKeyNot($claim->id)
+            ->selectRaw('COUNT(*) as total')
+            ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled', 'closed', 'manaual_collected') THEN 1 ELSE 0 END) as rejected")
+            ->first();
+
+        $previous = (int) ($stats->total ?? 0);
+        $rejected = (int) ($stats->rejected ?? 0);
+
         return min(100, ($previous * 10) + ($rejected * 20));
     }
 
@@ -142,10 +152,19 @@ class RiskCalculationService
     private function calculateClientRiskScore(Claim $claim): int
     {
         if (!$claim->client_id) return 30;
-        $total = Claim::where('client_id', $claim->client_id)->count();
-        $rejected = Claim::where('client_id', $claim->client_id)
-            ->whereIn('status', ['rejected', 'cancelled'])->count();
-        if ($total == 0) return 30;
+
+        $stats = Claim::query()
+            ->where('client_id', $claim->client_id)
+            ->whereKeyNot($claim->id)
+            ->selectRaw('COUNT(*) as total')
+            ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled') THEN 1 ELSE 0 END) as rejected")
+            ->first();
+
+        $total = (int) ($stats->total ?? 0);
+        $rejected = (int) ($stats->rejected ?? 0);
+
+        if ($total === 0) return 30;
+
         return min(100, ($rejected / $total) * 100 * 2);
     }
 
