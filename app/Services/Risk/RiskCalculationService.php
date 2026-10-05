@@ -155,7 +155,7 @@ class RiskCalculationService
 
         $stats = Claim::query()
             ->where('client_id', $claim->client_id)
-            ->whereKeyNot($claim->id)
+            ->where('id', '!=', $claim->id)
             ->selectRaw('COUNT(*) as total')
             ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled') THEN 1 ELSE 0 END) as rejected")
             ->first();
