@@ -12,7 +12,7 @@ class RiskController extends Controller
 
     public function show($id)
     {
-        $claim = Claim::with('riskHistories')->visibleTo(auth()->user())->findOrFail($id);
+        $claim = Claim::with('riskHistories.calculatedBy')->visibleTo(auth()->user())->findOrFail($id);
      
 
         return response()->json([
@@ -36,9 +36,10 @@ class RiskController extends Controller
         ]);
     }
 
-    public function recalculate(Claim $claim)
+    public function recalculate(int $claimId)
     {
-        $result = $this->riskService->calculate($claim, auth()->user());
+        $claim = Claim::visibleTo(auth()->user())->findOrFail($claimId);
+        $result = $this->riskService->calculate($claim, auth()->user(), 'manual_recalc');
         $claim->refresh();
 
         return response()->json([
