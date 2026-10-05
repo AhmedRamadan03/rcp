@@ -11,6 +11,7 @@ class ClaimRiskHistory extends Model
 
     protected $guarded = [];
     protected $casts = [
+        'risk_score' => 'decimal:2',
         'risk_factors' => 'array',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
