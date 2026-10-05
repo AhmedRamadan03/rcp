@@ -1,0 +1,24 @@
+<?php
+
+return [
+    'the_system' => 'System',
+    'days' => 'Days',
+    'name' => 'Name',
+    'date' => 'Date',
+    'total_claims' => 'Total claims',
+    'total_claims_amount' => 'Total Claims Amount',
+    'claims_status' => 'Claim Status',
+    'to' => 'To',
+    'from' => 'From',
+    'cancel' => 'Cancel',
+    'error' => 'Error',
+    'success' => 'Success',
+    'unauthorized' => 'Unauthorized',
+    'read_more' => 'Read More',
+    'show_less' => 'Show Less',
+    'chose_from_the_list' => 'Chose from the list',
+    'note' => 'Note',
+    'for' => 'For',
+    'escalation' => 'Escalation',
+    'failed' => 'Failed',
+];

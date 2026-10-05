@@ -1,0 +1,27 @@
+<?php
+
+return [
+    'request' => 'request',
+    'requests' => 'Requests',
+    'request_by' => 'Request By',
+    'current_status' => 'Current Status',
+    'new_status' => 'New Status',
+    'reason' => 'Reason',
+    'rejection_reason' => 'Rejection Reason',
+    'cancel_reason' => 'Cancel reason',
+    'approved_by' => 'Approved By',
+    'request_time' => 'Request Time',
+    'file' => 'File',
+    'registered' => 'Registered',
+    'approved' => 'Approved',
+    'rejected' => 'Rejected',
+    'cancel' => 'Cancel',
+    'reject_request' => 'Reject Request',
+    'request_has_been_accepted_successfully' => 'Request has been accepted successfully',
+    'request_has_been_rejected_successfully' => 'Request has been rejected successfully',
+    'there_are_already_opened_request' => 'There are already opened request',
+    'cancel_request' => 'Cancel Request',
+    'request_has_been_canceled_successfully' => 'Request has been canceled successfully',
+    'you_have_new_request' => 'You have new request',
+    'request_has_been_escalated_successfully' => 'Request has been escalated successfully',
+];

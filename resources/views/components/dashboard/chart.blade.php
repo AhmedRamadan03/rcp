@@ -1,0 +1,4 @@
+<div>
+
+Chart section
+</div>

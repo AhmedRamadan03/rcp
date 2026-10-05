@@ -1,0 +1,70 @@
+<?php
+
+return [
+    'target' => 'Target',
+    'targets' => 'Targets',
+    'add_target' => 'Add Target',
+    'add_user_or_users_to_target' => 'Add User\s to Target',
+    'total_completion' => 'Total Completion',
+    'total_collected' => 'Total Collected',
+    'total_target' => 'Total Target',
+    'total_remaining' => 'Total Remaining',
+    'collector_name' => 'Collector Name',
+    'large_file' => 'Large File',
+    'the_uploaded_file_must_be_less_than_mb' => 'The uploaded file must be less than 20 MB.',
+    'some_users_already_has_a_setup_target' => 'Some users already has a setup target.',
+    'created_successfully' => 'Target has been created successfully',
+    'updated_successfully' => 'Target has been updated successfully',
+    'target_is_expired' => 'Target can not be updated. It is expired',
+    'target_does_not_exist' => 'Target does not exist',
+    'target_already_completed' => 'Target is already completed',
+    'collector_has_no_target' => 'Collector has no target',
+    'target_already_exist' => 'Target already exist',
+    'officer_name' => 'Officer Name',
+    'sar' => 'SAR',
+
+    // Edit target
+    'edit_target' => 'Edit Target',
+
+    // Report
+    'report' => 'Report',
+    'reports' => 'Reports',
+    'officer_target' => 'Officer Target',
+    'officer_target_history' => 'Officer Target History',
+    'collected' => 'Collected',
+    'pending' => 'Pending',
+    'achieved' => 'Achieved',
+    'expired' => 'Expired',
+    'percentage' => 'Percentage',
+    'remaining' => 'Remaining',
+    'name' => 'Name',
+    'claims_status' => 'Claims Status',
+
+    'total_claims' => 'Total Claims',
+    'collected_claims' => 'Collected Claims',
+    'remaining_claims' => 'Remaining Claims',
+    'pending_claims' => 'Pending Claims',
+    'closed_claims' => 'Closed Claims',
+    'outstanding_claims' => 'Outstanding Claims',
+
+    'partial_claims' => 'Partial Claims',
+    'delay_claims' => 'Delay Claims',
+    'legal_claims' => 'Legal Claims',
+    'all_time_targets' => 'All Time Targets',
+    'achieved_targets' => 'Achieved Targets',
+    'remaining_targets' => 'Remaining Targets',
+
+    'status' => 'Status',
+    'start_date' => 'Start Date',
+    'end_date' => 'End Date',
+
+    // Target history
+    'targets_history' => 'Targets History',
+    'user' => 'User',
+    'old_target' => 'Old Target',
+    'new_target' => 'New Target',
+    'date' => 'Date',
+    'no_data_found' => 'No Data Found',
+    'target_does_not_change' => 'Target does not change',
+    'add_period' => 'Add Period',
+];

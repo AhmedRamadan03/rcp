@@ -1,0 +1,26 @@
+<?php
+
+return [
+    'reports' => 'Reports',
+    'default_on_payment_report' => 'Default On Payment Report',
+    'rejected_claims_report' => 'Rejected Claims Report',
+    'rejection_status' => 'Rejection Status',
+    'not_seen' => 'Not Seen',
+    'accepted' => 'Accepted',
+    'rejected' => 'Rejected',
+    'targets_report' => 'Targets Report',
+    'officer_name' => 'Officer name',
+    'total_claims' => 'Total claims',
+    'remaining_claims' => 'Remaining claims',
+    'canceled_claims' => 'Canceled claims',
+    'total_targets' => 'Total targets',
+    'achieved_targets' => 'Achieved targets',
+    'remaining_targets' => 'Remaining targets',
+    'outstanding_claims' => 'Outstanding claims',
+    'pending_claims' => 'Pending claims',
+    'collected_claims' => 'Collected claims',
+    'partial_claims' => 'Partial claims',
+    'delay_claims' => 'Delay claims',
+    'legal_claims' => 'Legal claims',
+    'closed_claims' => 'Closed claims',
+];

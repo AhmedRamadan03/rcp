@@ -1,0 +1,21 @@
+services:
+    php:
+        build:
+            args:
+                user: www-data # your username on your machine, you can get it by running echo $USER
+                uid: 1000
+            context: .
+            dockerfile: php.DockerFile
+        ports:
+            - "8000:8000"
+        volumes:
+            -   ./:/var/www/html
+        networks:
+            - laravel
+        extra_hosts:
+            - "host.docker.internal:172.17.0.1"
+
+
+networks:
+    laravel:
+        driver: bridge

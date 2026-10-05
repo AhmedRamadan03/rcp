@@ -1,0 +1,28 @@
+<?php
+
+return [
+    'users_list' => 'لائحة الحسابات',
+    'name' => 'الاسم',
+    'email' => 'الايميل',
+    'phone' => 'رقم الجوال',
+    'address' => 'العنوان البريدي',
+    'bio' => 'نبذة',
+    'bio_placeholder' => 'معلومات اكثر عن هذا الحساب',
+    'role' => 'الادوار',
+    'supervisor' => 'مشرف',
+    'actions' => 'تفعيل',
+    'create_user' => 'انشاء حساب',
+    'create_new_user' => 'انشاء حساب جديد',
+    'note' => 'ملاحظة',
+    'discount_percentage' => 'نسبة الخصم المسموح',
+    'edit_user' => 'تعديل حساب',
+    'choose_supervisor' => 'اختيار مشرف',
+    'user_details' => 'تفاصيل الحساب',
+    'delete_user' => 'مسح مستخدم',
+    'alternative_user' => 'البديل',
+    'alternative_user_to_continue' => 'أختر مستخدم بديل',
+    'the_default_password_is' => 'الرقم السري الافتراضي هو',
+    'profile_information_has_been_updated_successfully' => 'تم تحديث معلومات الملف الشخصي بنجاح',
+    'permissions' => 'الصلاحيات',
+    'user_has_been_deleted_successfully' => 'تم مسح المستخدم بنجاح',
+];

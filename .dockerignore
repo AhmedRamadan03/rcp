@@ -1,0 +1,5 @@
+.dockerignore
+.cache
+.github
+vendor
+node_modules

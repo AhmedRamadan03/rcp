@@ -1,0 +1,27 @@
+<?php
+
+return [
+    'request' => 'الطلب',
+    'requests' => 'الطلبات',
+    'request_by' => 'منشئ الطلب',
+    'current_status' => 'الحالة الحالية',
+    'new_status' => 'الحالة الجديدة',
+    'reason' => 'سبب التغيير',
+    'rejection_reason' => 'سبب الرفض',
+    'cancel_reason' => 'سبب الإلغاء',
+    'approved_by' => 'موافقة عن طريق',
+    'request_time' => 'زمن الطلب',
+    'file' => 'الملف',
+    'registered' => 'منشئ',
+    'approved' => 'موافقة',
+    'rejected' => 'رفض',
+    'cancel' => 'إلغاء',
+    'reject_request' => 'رفض الطلب',
+    'request_has_been_accepted_successfully' => 'تمت الموافقة علي الطلب',
+    'request_has_been_rejected_successfully' => 'تم رفض الطلب',
+    'there_are_already_opened_request' => 'يوجد طلب مفتوح مسبقا',
+    'cancel_request' => 'إلغاء الطلب',
+    'request_has_been_canceled_successfully' => 'تم إلغاء الطلب بنجاح',
+    'you_have_new_request' => 'لديك طلب جديد',
+    'request_has_been_escalated_successfully' => 'تم تصعيد الطلب بنجاح',
+];

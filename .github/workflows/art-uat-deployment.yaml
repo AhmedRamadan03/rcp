@@ -1,0 +1,140 @@
+name: ART - Backend (UAT)
+
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  push:
+    branches:
+       - uat
+
+concurrency:
+  group: uat-backend-art
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID: testcntx
+  GCP_SERVICE_ACCOUNT: keyless-vm-access@testcntx.iam.gserviceaccount.com
+  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/818972878762/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+
+  GCP_SECRET_ENV_NAME: RCP-ART-BACKEND-UAT
+
+  GCE_INSTANCE_NAME: rcp-siyaq
+  GCE_INSTANCE_ZONE: me-central2-a
+
+  DEPLOY_PATH: /var/www/html/uat/backend
+
+  WORKER_NAME: art-rcp-uat
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Generate Github App Token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.TAHEIYA_DEPLOYER_APP_ID }}
+          private-key: ${{ secrets.TAHEIYA_DEPLOYER_APP_PRIVATE_KEY }}
+
+
+      # 1 Authenticate via OIDC (no keys)
+      - name: Authenticate with GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      # 2 Initialize gcloud with the credentials
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      # 3 Deploy on the VM via SSH
+      - name: Deploy to server
+        run: |
+          set -e
+
+          GIT_TOKEN="${{ steps.app-token.outputs.token }}"
+          REPO_FULL_NAME="${{ github.repository }}"
+          BRANCH="${GITHUB_REF##*/}"
+
+          echo "Deploying ${REPO_FULL_NAME} (${BRANCH})"
+
+          gcloud compute ssh ${{ env.GCE_INSTANCE_NAME }} \
+            --zone ${{ env.GCE_INSTANCE_ZONE }} \
+            --tunnel-through-iap \
+            --command "sudo bash -lc '
+              set -e
+
+              if ! command -v git-lfs >/dev/null 2>&1; then
+                if ! command -v apt-get >/dev/null 2>&1; then
+                  echo \"git-lfs is missing and apt-get is unavailable on the deployment VM.\" >&2
+                  exit 1
+                fi
+
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y git-lfs
+              fi
+
+              git lfs install --system
+
+              TARGET_DIR=${{ env.DEPLOY_PATH }}
+              WORKER=\"${{ env.WORKER_NAME }}\"
+              REMOTE_URL=\"https://x-access-token:$GIT_TOKEN@github.com/$REPO_FULL_NAME.git\"
+
+
+              mkdir -p \$TARGET_DIR
+              chown -R www-data:www-data \$TARGET_DIR
+
+              sudo -H -E -u www-data bash -c \"
+                  set -e
+
+                  cd \$TARGET_DIR
+
+                  if [ ! -d .git ]; then
+                    git clone \$REMOTE_URL .
+                    cp .env.example .env
+                  else
+                    git remote set-url origin \$REMOTE_URL
+                  fi
+
+                  git lfs install --local
+                  git fetch origin $BRANCH
+                  git reset --hard origin/$BRANCH
+                  git lfs pull origin $BRANCH
+                  # git clean -fd # removes untracked files, be careful with this in production
+
+                  composer install --no-interaction --prefer-dist --optimize-autoloader
+              \"
+
+              gcloud secrets versions access latest --secret=\"${{ env.GCP_SECRET_ENV_NAME }}\" > \$TARGET_DIR/.env
+
+              chown www-data:www-data \$TARGET_DIR/.env
+              chmod 640 \$TARGET_DIR/.env
+
+              sudo -u www-data bash -c \"
+                  set -e
+                  cd \$TARGET_DIR
+
+                  php artisan config:clear
+                  php artisan migrate --force
+
+                  php artisan db:seed --class=GeneralPermissionSeeder
+                  php artisan db:seed --class=CategoryMessageVariablesSeeder
+
+                  php artisan optimize:clear
+              \"
+
+              chmod -R 755 \$TARGET_DIR/storage \$TARGET_DIR/bootstrap/cache \$TARGET_DIR/stubs
+
+              supervisorctl restart \$WORKER:*
+            '"

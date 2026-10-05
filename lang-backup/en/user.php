@@ -1,0 +1,28 @@
+<?php
+
+return [
+    'users_list' => 'Users List',
+    'name' => 'Name',
+    'email' => 'Email',
+    'phone' => 'Phone',
+    'address' => 'Address',
+    'bio' => 'Bio',
+    'bio_placeholder' => 'More information about the user',
+    'role' => 'Role',
+    'supervisor' => 'Supervisor',
+    'actions' => 'Actions',
+    'create_user' => 'Create User',
+    'create_new_user' => 'Create New User',
+    'note' => 'Note',
+    'discount_percentage' => 'Discount Percentage',
+    'edit_user' => 'Edit User',
+    'choose_supervisor' => 'Choose Supervisor',
+    'user_details' => 'User Details',
+    'delete_user' => 'Delete User',
+    'alternative_user' => 'Alternative User',
+    'alternative_user_to_continue' => 'Alternative User To Continue',
+    'the_default_password_is' => 'The Default Password is',
+    'profile_information_has_been_updated_successfully' => 'Profile Information Has Been Updated Successfully',
+    'permissions' => 'Permissions',
+    'user_has_been_deleted_successfully' => 'User Has Been Deleted Successfully',
+];

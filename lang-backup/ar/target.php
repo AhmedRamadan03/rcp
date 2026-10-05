@@ -1,0 +1,70 @@
+<?php
+
+return [
+    'target' => 'الهدف',
+    'targets' => 'الاهداف',
+    'add_target' => 'اضافة هدف',
+    'add_user_or_users_to_target' => 'اضافة مستخدمين او مستخدمين لهدف',
+    'total_completion' => 'مجموع المنتهي',
+    'total_collected' => 'مجموع المحصل',
+    'total_target' => 'مجموع الهدف',
+    'total_remaining' => 'مجموع المتبقي',
+    'collector_name' => 'اسم المحصل',
+    'large_file' => 'ملف كبير',
+    'the_uploaded_file_must_be_less_than_mb' => 'يجب ان يكون حجم الملف المرفوعة اقل من 20 ميجابايت',
+    'some_users_already_has_a_setup_target' => 'بعض المستخدمين لديهم هدف موجود',
+    'created_successfully' => 'تم إنشاء الهدف بنجاح',
+    'updated_successfully' => 'تم تحديث الهدف بنجاح',
+    'target_is_expired' => 'الهدف لم يتم تحديثه لانه منتهي',
+    'target_does_not_exist' => 'الهدف غير موجود',
+    'target_already_completed' => 'الهدف مكتمل',
+    'collector_has_no_target' => 'لا يوجد هدف للمحصل',
+    'target_already_exist' => 'الهدف موجود بالفعل',
+    'officer_name' => 'اسم المحصل',
+    'sar' => 'ريال سعودي',
+
+    // Edit target
+    'edit_target' => 'تعديل الهدف',
+
+    // Report
+    'report' => 'تقرير',
+    'reports' => 'تقارير',
+    'officer_target' => 'هدف المحصل',
+    'officer_target_history' => 'سجل هدف المحصل',
+    'collected' => 'محصل',
+    'pending' => 'قيد الانتظار',
+    'achieved' => 'منجز',
+    'expired' => 'منتهي',
+    'percentage' => 'النسبة المئوية',
+    'remaining' => 'متبقي',
+    'name' => 'الاسم',
+    'claims_status' => 'حالات المطالبات',
+
+    'total_claims' => 'المطالبات الكلية',
+    'collected_claims' => 'المطالبات المحصلة',
+    'remaining_claims' => 'المطالبات المتبقية',
+    'pending_claims' => 'المطالبات القيد الانتظار',
+    'closed_claims' => 'المطالبات المغلقة',
+    'outstanding_claims' => 'المطالبات المعلقة',
+
+    'partial_claims' => 'المطالبات المقسطة',
+    'delay_claims' => 'المطالبات المؤجلة',
+    'legal_claims' => 'المطالبات القانونية',
+    'all_time_targets' => 'كل الاهداف',
+    'achieved_targets' => 'الاهداف المنجزة',
+    'remaining_targets' => 'الاهداف المتبقية',
+
+    'status' => 'الحالة',
+    'start_date' => 'تاريخ البدء',
+    'end_date' => 'تاريخ الانتهاء',
+
+    // Target history
+    'targets_history' => 'سجل اللهداف',
+    'user' => 'المستخدم',
+    'old_target' => 'الهدف السابق',
+    'new_target' => 'الهدف الجديد',
+    'date' => 'التاريخ',
+    'no_data_found' => 'لا توجد بيانات',
+    'target_does_not_change' => 'لا يمكن تغيير الهدف',
+    'add_period' => 'إضافة مدة',
+];

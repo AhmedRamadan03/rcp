@@ -1,0 +1,36 @@
+<?php
+
+return [
+    'reports' => 'التقارير',
+    'default_on_payment_report' => 'تقارير المتعثرين بالسداد',
+    'rejected_claims_report' => 'تقارير طلبات العميل',
+    'rejection_status' => 'حالة طلب العميل',
+    'not_seen' => 'جديد',
+    'accepted' => 'موافق عليه',
+    'rejected' => 'مرفوض',
+    'targets_report' => 'تقارير الاهداف',
+    'officer_name' => 'اسم المحصل',
+    'total_claims' => ';كل المطالبات',
+    'remaining_claims' => 'المطالبات المتبقية',
+    'canceled_claims' => 'المطالبات الملغية',
+    'total_targets' => 'مجموع الاهداف',
+    'achieved_targets' => 'الاهداف المنجزة',
+    'remaining_targets' => 'الاهداف المتبقية',
+    'outstanding_claims' => 'المطالبات الغير منجزة',
+    'pending_claims' => 'المطالبات القيد الانتظار',
+    'collected_claims' => 'المطالبات المحصلة',
+    'partial_claims' => 'المطالبات المقسطة',
+    'delay_claims' => 'المطالبات المتأخرة',
+    'legal_claims' => 'المطالبات القانونية',
+    'closed_claims' => 'المطالبات المغلقة',
+
+    'technical-support' => 'الدعم الفني',
+
+    "request_no" => "رقم الطلب",
+    "request_name" => "اسم الطلب",
+    "request_type" => "نوع الطلب",
+    "status" => "الحالة",
+    "request_at" => "تاريخ الطلب",
+    "replied_at" => "تاريخ الرد",
+    "filters" => "الفلاتر",
+];
