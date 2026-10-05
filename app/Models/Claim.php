@@ -28,6 +28,9 @@ class Claim extends Model
 
     protected $casts = [
         'created_at' => 'datetime',
+        'risk_score' => 'decimal:2',
+        'risk_factors' => 'array',
+        'risk_calculated_at' => 'datetime',
         'accident_date' => 'date',
         'date_of_loss' => 'date',
     ];
