@@ -55,7 +55,9 @@ Route::get('/excel-bulk-assign-template', [ClaimInfoController::class, 'download
 
 // Risk Assessment Routes
 Route::get("/{claimId}/risk", [App\Http\Controllers\Api\V1\RiskController::class, "show"])->name("claims.risk.show")->middleware("auth:sanctum");
-Route::post("/{claimId}/risk/recalculate", [App\Http\Controllers\Api\V1\RiskController::class, "recalculate"])->name("claims.risk.recalculate")->middleware("auth:sanctum");
+Route::post("/{claimId}/risk/recalculate", [App\Http\Controllers\Api\V1\RiskController::class, "recalculate"])
+    ->name("claims.risk.recalculate")
+    ->middleware(["auth:sanctum", "can:view,App\\Models\\Claim,claimId"]);
 Route::get("/risk-summary", [App\Http\Controllers\Api\V1\RiskController::class, "summary"])->name("claims.risk.summary")->middleware("auth:sanctum");
 Route::get('/{claimId}', [ClaimController::class, 'show'])
     ->name('claims.show')
