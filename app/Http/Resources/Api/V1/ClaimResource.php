@@ -21,6 +21,8 @@ class ClaimResource extends JsonResource
             "risk_level" => $this->risk_level ?? 'low',
             "risk_color" => $this->risk_color ?? 'green',
             "risk_label" => $this->risk_label ?? 'مخاطر منخفضة',
+            "risk_decision" => $this->risk_decision,
+            "risk_decision_label" => $this->risk_decision_label,
 
             'reference' => $this->reference,
             'external_reference' => $this->external_reference,
