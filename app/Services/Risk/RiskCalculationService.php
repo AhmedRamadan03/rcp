@@ -10,6 +10,9 @@ use Carbon\Carbon;
 
 class RiskCalculationService
 {
+    private const CITY_RISK_MINIMUM_CLAIMS = 1000;
+    private const CITY_RISK_NEUTRAL_SCORE = 30;
+
     protected array $weights = [
         'claim_type' => 15,
         'amount' => 20,
@@ -146,7 +149,26 @@ class RiskCalculationService
 
     private function calculateCityRiskScore(Claim $claim): int
     {
-        return 30;
+        if (!$claim->city_id) {
+            return self::CITY_RISK_NEUTRAL_SCORE;
+        }
+
+        $stats = Claim::query()
+            ->where('city_id', $claim->city_id)
+            ->where('id', '!=', $claim->id)
+            ->selectRaw('COUNT(*) as total')
+            ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled', 'closed') THEN 1 ELSE 0 END) as bad_claims")
+            ->first();
+
+        $total = (int) ($stats->total ?? 0);
+
+        if ($total < self::CITY_RISK_MINIMUM_CLAIMS) {
+            return self::CITY_RISK_NEUTRAL_SCORE;
+        }
+
+        $badClaims = (int) ($stats->bad_claims ?? 0);
+
+        return min(100, round(($badClaims / $total) * 100));
     }
 
     private function calculateClientRiskScore(Claim $claim): int
