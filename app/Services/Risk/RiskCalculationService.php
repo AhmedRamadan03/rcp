@@ -10,6 +10,7 @@ use Carbon\Carbon;
 
 class RiskCalculationService
 {
+    private const RISK_VERSION = '1.0';
     private const CITY_RISK_MINIMUM_CLAIMS = 1000;
     private const CITY_RISK_NEUTRAL_SCORE = 30;
 
@@ -29,31 +30,31 @@ class RiskCalculationService
         $score = 0;
 
         $typeScore = $this->calculateTypeScore($claim);
-        $factors['claim_type'] = ['score' => $typeScore, 'weight' => $this->weights['claim_type'], 'label' => 'نوع المطالبة'];
+        $factors['claim_type'] = $this->buildFactor($typeScore, $this->weights['claim_type'], 'نوع المطالبة');
         $score += $typeScore * $this->weights['claim_type'] / 100;
 
         $amountScore = $this->calculateAmountScore($claim);
-        $factors['amount'] = ['score' => $amountScore, 'weight' => $this->weights['amount'], 'label' => 'قيمة المطالبة'];
+        $factors['amount'] = $this->buildFactor($amountScore, $this->weights['amount'], 'قيمة المطالبة');
         $score += $amountScore * $this->weights['amount'] / 100;
 
         $ageScore = $this->calculateAccidentAgeScore($claim);
-        $factors['accident_age'] = ['score' => $ageScore, 'weight' => $this->weights['accident_age_months'], 'label' => 'قدم الحادث'];
+        $factors['accident_age'] = $this->buildFactor($ageScore, $this->weights['accident_age_months'], 'قدم الحادث');
         $score += $ageScore * $this->weights['accident_age_months'] / 100;
 
         $historyScore = $this->calculateHistoryScore($claim);
-        $factors['claim_history'] = ['score' => $historyScore, 'weight' => $this->weights['claim_history_count'], 'label' => 'السجل السابق'];
+        $factors['claim_history'] = $this->buildFactor($historyScore, $this->weights['claim_history_count'], 'السجل السابق');
         $score += $historyScore * $this->weights['claim_history_count'] / 100;
 
         $debtorScore = $this->calculateDebtorScore($claim);
-        $factors['debtor_type'] = ['score' => $debtorScore, 'weight' => $this->weights['debtor_type'], 'label' => 'نوع المدين'];
+        $factors['debtor_type'] = $this->buildFactor($debtorScore, $this->weights['debtor_type'], 'نوع المدين');
         $score += $debtorScore * $this->weights['debtor_type'] / 100;
 
         $cityScore = $this->calculateCityRiskScore($claim);
-        $factors['city_risk'] = ['score' => $cityScore, 'weight' => $this->weights['city_risk'], 'label' => 'مخاطر المنطقة'];
+        $factors['city_risk'] = $this->buildFactor($cityScore, $this->weights['city_risk'], 'مخاطر المنطقة');
         $score += $cityScore * $this->weights['city_risk'] / 100;
 
         $clientScore = $this->calculateClientRiskScore($claim);
-        $factors['client_risk'] = ['score' => $clientScore, 'weight' => $this->weights['client_risk'], 'label' => 'مخاطر العميل'];
+        $factors['client_risk'] = $this->buildFactor($clientScore, $this->weights['client_risk'], 'مخاطر العميل');
         $score += $clientScore * $this->weights['client_risk'] / 100;
 
         $finalScore = min(100, round($score, 2));
@@ -62,6 +63,7 @@ class RiskCalculationService
         $result = [
             'risk_score' => $finalScore,
             'risk_level' => $level,
+            'risk_version' => self::RISK_VERSION,
             'risk_factors' => $factors,
             'calculated_at' => now(),
         ];
@@ -69,6 +71,7 @@ class RiskCalculationService
         $claim->update([
             'risk_score' => $finalScore,
             'risk_factors' => $factors,
+            'risk_version' => self::RISK_VERSION,
             'risk_calculated_at' => now(),
         ]);
 
@@ -76,11 +79,22 @@ class RiskCalculationService
             'claim_id' => $claim->id,
             'risk_score' => $finalScore,
             'risk_factors' => $factors,
+            'risk_version' => self::RISK_VERSION,
             'trigger' => $trigger,
             'calculated_by' => $calculatedBy?->id,
         ]);
 
         return $result;
+    }
+
+    private function buildFactor(int|float $score, int $weight, string $label): array
+    {
+        return [
+            'score' => $score,
+            'weight' => $weight,
+            'contribution' => round($score * $weight / 100, 2),
+            'label' => $label,
+        ];
     }
 
     private function calculateTypeScore(Claim $claim): int
