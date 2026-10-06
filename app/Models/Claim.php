@@ -7,6 +7,7 @@ use App\Enums\DebtorType;
 use App\Enums\LinkSendStatus;
 use App\Enums\PaymentType;
 use App\Enums\ReturnReason;
+use App\Enums\RiskDecision;
 use App\Models\ClaimRiskHistory;
 use App\Models\Concerns\HasImmutableClaimReference;
 use App\Enums\Roles;
@@ -310,6 +311,20 @@ class Claim extends Model
         );
     }
 
+    protected function riskDecision(): Attribute
+    {
+        return Attribute::make(
+            get: fn () => RiskDecision::fromScore((float) ($this->risk_score ?? 0))->value
+        );
+    }
+
+    protected function riskDecisionLabel(): Attribute
+    {
+        return Attribute::make(
+            get: fn () => RiskDecision::fromScore((float) ($this->risk_score ?? 0))->label()
+        );
+    }
+
     public function scopeHighRisk($query)
     {
         return $query->where('risk_score', '>=', 70);
@@ -370,6 +385,8 @@ class Claim extends Model
             "risk_level" => $this->risk_level ?? 'low',
             "risk_color" => $this->risk_color ?? 'green',
             "risk_label" => $this->risk_label ?? 'مخاطر منخفضة',
+            "risk_decision" => $this->risk_decision,
+            "risk_decision_label" => $this->risk_decision_label,
 
 
         ];
