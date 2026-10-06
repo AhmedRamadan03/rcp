@@ -34,7 +34,7 @@ class RiskCalculationServiceTest extends TestCase
         $result = app(RiskCalculationService::class)->calculate($claim);
 
         $this->assertSame(30, $result['risk_factors']['city_risk']['score']);
-        $this->assertSame(3, $result['risk_factors']['city_risk']['contribution']);
+        $this->assertSame(3.0, $result['risk_factors']['city_risk']['contribution']);
     }
 
     public function test_city_risk_is_neutral_when_city_has_fewer_than_1000_historical_claims(): void
@@ -53,7 +53,7 @@ class RiskCalculationServiceTest extends TestCase
         $result = app(RiskCalculationService::class)->calculate($currentClaim);
 
         $this->assertSame(30, $result['risk_factors']['city_risk']['score']);
-        $this->assertSame(3, $result['risk_factors']['city_risk']['contribution']);
+        $this->assertSame(3.0, $result['risk_factors']['city_risk']['contribution']);
     }
 
     public function test_city_risk_uses_rejected_cancelled_and_closed_claims_after_1000_claims(): void
@@ -84,7 +84,7 @@ class RiskCalculationServiceTest extends TestCase
         $result = app(RiskCalculationService::class)->calculate($currentClaim);
 
         $this->assertSame(30, $result['risk_factors']['city_risk']['score']);
-        $this->assertSame(3, $result['risk_factors']['city_risk']['contribution']);
+        $this->assertSame(3.0, $result['risk_factors']['city_risk']['contribution']);
     }
 
     private function createClaim(array $attributes = []): Claim
