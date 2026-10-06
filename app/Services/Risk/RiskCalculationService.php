@@ -126,7 +126,7 @@ class RiskCalculationService
             ->where('debtor_nid', $claim->debtor_nid)
             ->where('id', '!=', $claim->id)
             ->selectRaw('COUNT(*) as total')
-            ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled', 'closed', 'manaual_collected') THEN 1 ELSE 0 END) as rejected")
+            ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled', 'closed') THEN 1 ELSE 0 END) as rejected")
             ->first();
 
         $previous = (int) ($stats->total ?? 0);
