@@ -23,6 +23,8 @@ class RiskController extends Controller
                 'risk_level' => $claim->risk_level ?? 'low',
                 'risk_color' => $claim->risk_color ?? 'green',
                 'risk_label' => $claim->risk_label ?? 'مخاطر منخفضة',
+                'risk_decision' => $claim->risk_decision,
+                'risk_decision_label' => $claim->risk_decision_label,
                 'risk_factors' => $claim->risk_factors ?? [],
                 'calculated_at' => $claim->risk_calculated_at,
                 'history' => $claim->riskHistories->map(fn($h) => [
@@ -45,7 +47,10 @@ class RiskController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'تم إعادة حساب المخاطر بنجاح',
-            'data' => $result,
+            'data' => array_merge($result, [
+                'risk_decision' => $claim->risk_decision,
+                'risk_decision_label' => $claim->risk_decision_label,
+            ]),
         ]);
     }
 
