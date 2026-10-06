@@ -10,6 +10,10 @@ use Carbon\Carbon;
 
 class RiskCalculationService
 {
+    private const RISK_VERSION = '1.0';
+    private const CITY_RISK_MINIMUM_CLAIMS = 1000;
+    private const CITY_RISK_NEUTRAL_SCORE = 30;
+
     protected array $weights = [
         'claim_type' => 15,
         'amount' => 20,
@@ -20,37 +24,37 @@ class RiskCalculationService
         'client_risk' => 5,
     ];
 
-    public function calculate(Claim $claim, ?User $calculatedBy = null): array
+    public function calculate(Claim $claim, ?User $calculatedBy = null, string $trigger = 'updated'): array
     {
         $factors = [];
         $score = 0;
 
         $typeScore = $this->calculateTypeScore($claim);
-        $factors['claim_type'] = ['score' => $typeScore, 'weight' => $this->weights['claim_type'], 'label' => 'نوع المطالبة'];
+        $factors['claim_type'] = $this->buildFactor($typeScore, $this->weights['claim_type'], 'نوع المطالبة');
         $score += $typeScore * $this->weights['claim_type'] / 100;
 
         $amountScore = $this->calculateAmountScore($claim);
-        $factors['amount'] = ['score' => $amountScore, 'weight' => $this->weights['amount'], 'label' => 'قيمة المطالبة'];
+        $factors['amount'] = $this->buildFactor($amountScore, $this->weights['amount'], 'قيمة المطالبة');
         $score += $amountScore * $this->weights['amount'] / 100;
 
         $ageScore = $this->calculateAccidentAgeScore($claim);
-        $factors['accident_age'] = ['score' => $ageScore, 'weight' => $this->weights['accident_age_months'], 'label' => 'قدم الحادث'];
+        $factors['accident_age'] = $this->buildFactor($ageScore, $this->weights['accident_age_months'], 'قدم الحادث');
         $score += $ageScore * $this->weights['accident_age_months'] / 100;
 
         $historyScore = $this->calculateHistoryScore($claim);
-        $factors['claim_history'] = ['score' => $historyScore, 'weight' => $this->weights['claim_history_count'], 'label' => 'السجل السابق'];
+        $factors['claim_history'] = $this->buildFactor($historyScore, $this->weights['claim_history_count'], 'السجل السابق');
         $score += $historyScore * $this->weights['claim_history_count'] / 100;
 
         $debtorScore = $this->calculateDebtorScore($claim);
-        $factors['debtor_type'] = ['score' => $debtorScore, 'weight' => $this->weights['debtor_type'], 'label' => 'نوع المدين'];
+        $factors['debtor_type'] = $this->buildFactor($debtorScore, $this->weights['debtor_type'], 'نوع المدين');
         $score += $debtorScore * $this->weights['debtor_type'] / 100;
 
         $cityScore = $this->calculateCityRiskScore($claim);
-        $factors['city_risk'] = ['score' => $cityScore, 'weight' => $this->weights['city_risk'], 'label' => 'مخاطر المنطقة'];
+        $factors['city_risk'] = $this->buildFactor($cityScore, $this->weights['city_risk'], 'مخاطر المنطقة');
         $score += $cityScore * $this->weights['city_risk'] / 100;
 
         $clientScore = $this->calculateClientRiskScore($claim);
-        $factors['client_risk'] = ['score' => $clientScore, 'weight' => $this->weights['client_risk'], 'label' => 'مخاطر العميل'];
+        $factors['client_risk'] = $this->buildFactor($clientScore, $this->weights['client_risk'], 'مخاطر العميل');
         $score += $clientScore * $this->weights['client_risk'] / 100;
 
         $finalScore = min(100, round($score, 2));
@@ -59,6 +63,7 @@ class RiskCalculationService
         $result = [
             'risk_score' => $finalScore,
             'risk_level' => $level,
+            'risk_version' => self::RISK_VERSION,
             'risk_factors' => $factors,
             'calculated_at' => now(),
         ];
@@ -66,6 +71,7 @@ class RiskCalculationService
         $claim->update([
             'risk_score' => $finalScore,
             'risk_factors' => $factors,
+            'risk_version' => self::RISK_VERSION,
             'risk_calculated_at' => now(),
         ]);
 
@@ -73,11 +79,22 @@ class RiskCalculationService
             'claim_id' => $claim->id,
             'risk_score' => $finalScore,
             'risk_factors' => $factors,
-            'trigger' => 'updated',
+            'risk_version' => self::RISK_VERSION,
+            'trigger' => $trigger,
             'calculated_by' => $calculatedBy?->id,
         ]);
 
         return $result;
+    }
+
+    private function buildFactor(int|float $score, int $weight, string $label): array
+    {
+        return [
+            'score' => $score,
+            'weight' => $weight,
+            'contribution' => round($score * $weight / 100, 2),
+            'label' => $label,
+        ];
     }
 
     private function calculateTypeScore(Claim $claim): int
@@ -106,7 +123,11 @@ class RiskCalculationService
     private function calculateAccidentAgeScore(Claim $claim): int
     {
         if (!$claim->accident_date) return 50;
-        $months = Carbon::parse($claim->accident_date)->diffInMonths(now());
+
+        $accidentDate = Carbon::parse($claim->accident_date);
+        if ($accidentDate->isFuture()) return 50;
+
+        $months = $accidentDate->diffInMonths(now());
         if ($months > 24) return 90;
         if ($months > 12) return 70;
         if ($months > 6) return 40;
@@ -116,12 +137,18 @@ class RiskCalculationService
 
     private function calculateHistoryScore(Claim $claim): int
     {
-        $previous = Claim::where('debtor_nid', $claim->debtor_nid)
+        if (!$claim->debtor_nid) return 0;
+
+        $stats = Claim::query()
+            ->where('debtor_nid', $claim->debtor_nid)
             ->where('id', '!=', $claim->id)
-            ->count();
-        $rejected = Claim::where('debtor_nid', $claim->debtor_nid)
-            ->whereIn('status', ['rejected', 'cancelled', 'closed', 'manaual_collected'])
-            ->count();
+            ->selectRaw('COUNT(*) as total')
+            ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled', 'closed') THEN 1 ELSE 0 END) as rejected")
+            ->first();
+
+        $previous = (int) ($stats->total ?? 0);
+        $rejected = (int) ($stats->rejected ?? 0);
+
         return min(100, ($previous * 10) + ($rejected * 20));
     }
 
@@ -136,16 +163,44 @@ class RiskCalculationService
 
     private function calculateCityRiskScore(Claim $claim): int
     {
-        return 30;
+        if (!$claim->city_id) {
+            return self::CITY_RISK_NEUTRAL_SCORE;
+        }
+
+        $stats = Claim::query()
+            ->where('city_id', $claim->city_id)
+            ->where('id', '!=', $claim->id)
+            ->selectRaw('COUNT(*) as total')
+            ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled', 'closed') THEN 1 ELSE 0 END) as bad_claims")
+            ->first();
+
+        $total = (int) ($stats->total ?? 0);
+
+        if ($total < self::CITY_RISK_MINIMUM_CLAIMS) {
+            return self::CITY_RISK_NEUTRAL_SCORE;
+        }
+
+        $badClaims = (int) ($stats->bad_claims ?? 0);
+
+        return min(100, round(($badClaims / $total) * 100));
     }
 
     private function calculateClientRiskScore(Claim $claim): int
     {
         if (!$claim->client_id) return 30;
-        $total = Claim::where('client_id', $claim->client_id)->count();
-        $rejected = Claim::where('client_id', $claim->client_id)
-            ->whereIn('status', ['rejected', 'cancelled'])->count();
-        if ($total == 0) return 30;
+
+        $stats = Claim::query()
+            ->where('client_id', $claim->client_id)
+            ->where('id', '!=', $claim->id)
+            ->selectRaw('COUNT(*) as total')
+            ->selectRaw("SUM(CASE WHEN status IN ('rejected', 'cancelled') THEN 1 ELSE 0 END) as rejected")
+            ->first();
+
+        $total = (int) ($stats->total ?? 0);
+        $rejected = (int) ($stats->rejected ?? 0);
+
+        if ($total === 0) return 30;
+
         return min(100, ($rejected / $total) * 100 * 2);
     }
 

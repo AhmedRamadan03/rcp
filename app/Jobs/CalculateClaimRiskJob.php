@@ -18,11 +18,21 @@ class CalculateClaimRiskJob implements ShouldQueue
 
     public function __construct(
         protected Claim $claim,
-        protected ?int $calculatedBy = null
+        protected ?int $calculatedBy = null,
+        protected string $trigger = 'updated'
     ) {}
 
     public function handle(RiskCalculationService $service): void
     {
-        $service->calculate($this->claim, \App\Models\User::find($this->calculatedBy));
+        $claim = $this->claim->fresh();
+        if (!$claim) {
+            return;
+        }
+
+        $service->calculate(
+            $claim,
+            \App\Models\User::find($this->calculatedBy),
+            $this->trigger
+        );
     }
 }

@@ -8,14 +8,18 @@ class ClaimRiskObserver
 {
     public function created(Claim $claim): void
     {
-        dispatch(new CalculateClaimRiskJob($claim, auth()->id()));
+        dispatch(new CalculateClaimRiskJob($claim, auth()->id(), 'created'))->afterCommit();
     }
 
     public function updated(Claim $claim): void
     {
-        $riskFields = ['amount', 'type', 'debtor_type', 'accident_date', 'status', 'city_id', 'debtor_nid', 'claim_number', 'client_id'];
+        $riskFields = ['amount', 'type', 'debtor_type', 'accident_date', 'status', 'city_id', 'debtor_nid', 'client_id'];
         if ($claim->wasChanged($riskFields)) {
-            dispatch(new CalculateClaimRiskJob($claim, auth()->id()));
+            dispatch(new CalculateClaimRiskJob(
+                $claim,
+                auth()->id(),
+                $claim->wasChanged('status') ? 'status_change' : 'updated'
+            ))->afterCommit();
         }
     }
 }

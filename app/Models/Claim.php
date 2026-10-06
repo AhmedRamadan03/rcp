@@ -28,6 +28,9 @@ class Claim extends Model
 
     protected $casts = [
         'created_at' => 'datetime',
+        'risk_score' => 'decimal:2',
+        'risk_factors' => 'array',
+        'risk_calculated_at' => 'datetime',
         'accident_date' => 'date',
         'date_of_loss' => 'date',
     ];
@@ -364,6 +367,7 @@ class Claim extends Model
             "policy_number" => $this->policy_number,
             "sub_claim_number" => $this->sub_claim_number,
             "risk_score" => $this->risk_score ?? 0,
+            "risk_version" => $this->risk_version,
             "risk_level" => $this->risk_level ?? 'low',
             "risk_color" => $this->risk_color ?? 'green',
             "risk_label" => $this->risk_label ?? 'مخاطر منخفضة',
