@@ -17,6 +17,15 @@ class RiskCalculationServiceTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Role::create(['title' => 'Test Role']);
+        Client::factory()->create();
+        User::factory()->create();
+    }
+
     public function test_city_risk_is_neutral_without_a_city(): void
     {
         $claim = $this->createClaim(['city_id' => null]);
@@ -51,8 +60,10 @@ class RiskCalculationServiceTest extends TestCase
             ->state(['city_id' => $city->id, 'status' => ClaimStatus::REGISTERED->value])
             ->make();
 
-        foreach ([ClaimStatus::REJECTED->value, ClaimStatus::CLOSED->value, 'cancelled'] as $status) {
-            $claims[$this->statusOffset($status)]->status = $status;
+        for ($i = 0; $i < 100; $i++) {
+            $claims[$i]->status = ClaimStatus::REJECTED->value;
+            $claims[$i + 100]->status = ClaimStatus::CLOSED->value;
+            $claims[$i + 200]->status = 'cancelled';
         }
 
         DB::table('claims')->insert($claims->map(fn (Claim $claim) => $claim->getAttributes())->all());
@@ -61,16 +72,8 @@ class RiskCalculationServiceTest extends TestCase
 
         $result = app(RiskCalculationService::class)->calculate($currentClaim);
 
-        $this->assertSame(0, $result['risk_factors']['city_risk']['score']);
-    }
-
-    private function statusOffset(string $status): int
-    {
-        return match ($status) {
-            ClaimStatus::REJECTED->value => 0,
-            ClaimStatus::CLOSED->value => 1,
-            'cancelled' => 2,
-        };
+        $this->assertSame(30, $result['risk_factors']['city_risk']['score']);
+        $this->assertSame(3, $result['risk_factors']['city_risk']['contribution']);
     }
 
     private function createClaim(array $attributes = []): Claim
