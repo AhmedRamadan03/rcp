@@ -1,17 +1,17 @@
 # Permission Scope — Analysis & Implementation Design
 
-## 1. الهدف
+## 1. Purpose
 
-إضافة **Scope** إلى نظام الـ General Permissions بحيث لا تكون الصلاحية مجرد:
+Add **Scope** to the General Permissions system so a permission is not limited to:
 
-- هل المستخدم يملك الصلاحية؟ `granted`
-- هل يحتاج موافقة؟ `with_approve`
+- Does the user have the permission? `granted`
+- Does the action require approval? `with_approve`
 
-بل يصبح لدينا أيضاً:
+It also defines:
 
-- ما هو نطاق البيانات التي يستطيع المستخدم رؤيتها؟ `scope`
+- What data visibility range the user has access to? `scope`
 
-المبدأ المقترح:
+Core principle:
 
 ```text
 granted       = Authorization
@@ -32,9 +32,9 @@ with_approve  = Approval Workflow
 
 ---
 
-## 2. الشكل المقترح لتعريف الـ Permission في Seeder
+## 2. Proposed Permission Definition in the Seeder
 
-السؤال الأساسي هو هل يمكن تعريف الـ permission بهذا الشكل؟
+The key question is whether the permission can be defined this way.
 
 ```php
 [
@@ -47,11 +47,11 @@ with_approve  = Approval Workflow
 ],
 ```
 
-### الإجابة
+### Answer
 
-**نعم. هذا هو الشكل الأنسب للتصميم المقصود، مع ملاحظة أن الكود الحالي يحتاج إلى تعديل طريقة قراءة `permission_mode`.**
+**Yes. This is the intended design, with the important note that the current code must update how `permission_mode` is read.**
 
-في هذا التصميم، `permission_mode` لا يكون مجرد list لأسماء الـ modes، بل يصبح **configuration map**:
+In this design, `permission_mode` is not just a list of mode names; it becomes a **configuration map**:
 
 ```php
 [
@@ -59,11 +59,11 @@ with_approve  = Approval Workflow
 ]
 ```
 
-أي أن:
+This means:
 
-- `scope` = الـ mode الذي يدعمه الـ permission.
-- `['onlyme', 'all', 'team']` = القيم المسموحة لهذا الـ mode.
-- عند إسناد permission للمستخدم يتم اختيار **Scope واحدة فقط**.
+- `scope` = the mode supported by the permission.
+- `['onlyme', 'all', 'team']` = the allowed values for that mode.
+- When the permission is assigned to a user, exactly **one Scope value** is selected.
 
 مثال:
 
@@ -78,7 +78,7 @@ with_approve  = Approval Workflow
 ],
 ```
 
-ثم User Permission:
+Then the User Permission becomes:
 
 ```json
 {
@@ -89,13 +89,13 @@ with_approve  = Approval Workflow
 }
 ```
 
-هذا يعني أن الـ GeneralPermission يعرّف **الخيارات المتاحة**، بينما User Permission يخزن **الاختيار الفعلي**.
+This means GeneralPermission defines the **available options**, while User Permission stores the **actual selected value**.
 
 ---
 
-# 3. التصميم الموصى به
+# 3. Recommended Design
 
-الـ `permission_mode` المستهدف يكون configuration map.
+The target `permission_mode` structure is a configuration map.
 
 Permission يدعم Scope:
 
@@ -110,7 +110,7 @@ Permission يدعم Scope:
 ],
 ```
 
-ولو permission يدعم Scope و Approval معاً:
+If a permission supports both Scope and Approval:
 
 ```php
 [
@@ -124,7 +124,7 @@ Permission يدعم Scope:
 ],
 ```
 
-ثم تكون قيم الـ scope نفسها في Permission الخاص بالمستخدم:
+The selected scope value is then stored in the User Permission:
 
 ```json
 {
@@ -135,7 +135,7 @@ Permission يدعم Scope:
 }
 ```
 
-وهذا يفصل بين:
+This separates:
 
 ```text
 GeneralPermission.permission_mode
@@ -149,9 +149,9 @@ What value was assigned to this user?
 
 ---
 
-# 4. لماذا نضع allowed values داخل permission_mode؟
+# 4. Why Put Allowed Values Inside permission_mode?
 
-لأن الهدف هنا هو أن يكون تعريف الـ GeneralPermission هو **مصدر الحقيقة للخيارات المسموحة**.
+لأن Purpose هنا هو أن يكون تعريف الـ GeneralPermission هو **مصدر الحقيقة للخيارات المسموحة**.
 
 ```php
 'permission_mode' => [
@@ -168,23 +168,23 @@ scope
     └── team
 ```
 
-بينما User Permission يخزن قيمة واحدة فقط:
+User Permission stores only one selected value:
 
 ```json
 "scope": "team"
 ```
 
-وبالتالي:
+Therefore:
 
 ```text
 GeneralPermission
-    → ما هي القيم المسموحة؟
+    → What values are allowed?
 
 User Permission
-    → ما القيمة التي تم اختيارها لهذا المستخدم؟
+    → What value was selected for this user?
 ```
 
-وهذا يجعل الـ permission definition مسؤولاً عن validation أيضاً، بدلاً من تكرار قائمة scopes في أماكن متعددة.
+This also makes the permission definition the source for validation instead of duplicating the scope list across multiple places.
 
 مثال:
 
@@ -210,13 +210,13 @@ show_claim:
     scope = all
 ```
 
-وهذا يسمح بأن يكون نفس الـ permission قابلاً لإعطاء scopes مختلفة لمستخدمين مختلفين.
+This allows the same permission to be assigned with different scopes to different users.
 
 ---
 
-# 5. القيم المسموحة للـ Scope
+# 5. Allowed Scope Values
 
-القيم الأساسية المقترحة:
+The proposed core values are:
 
 ```text
 all
@@ -226,35 +226,35 @@ team
 
 ## all
 
-المستخدم يستطيع الوصول إلى جميع records التي يسمح له الـ permission بالوصول إليها.
+The user can access all records allowed by the permission.
 
 مثال:
 
 ```text
 show_claim + scope=all
-→ جميع الـ claims
+→ all claims
 ```
 
 ## onlyme
 
-المستخدم يستطيع الوصول فقط إلى الـ records المرتبطة به مباشرة.
+The user can access only records directly associated with them.
 
-مثال محتمل:
+Example:
 
 ```text
 show_claim + scope=onlyme
 → claims assigned/owned by current user
 ```
 
-**مهم:** تعريف "own" يجب أن يعتمد على relation الرسمي الموجود في RCP، وليس على افتراض أن أي user_id يمثل صاحب الـ claim.
+**Important:** The definition of "own" must be based on the official relationship in RCP, not on the assumption that any user_id represents the claim owner.
 
 ## team
 
-المستخدم يستطيع الوصول إلى records الخاصة به وبأعضاء الـ team المرتبطين به.
+The user can access their own records and records belonging to members of their team.
 
-لكن قبل implementation يجب تثبيت معنى team في الـ domain الحالي.
+Before implementation, the exact meaning of `team` must be established from the current domain.
 
-لا يجب افتراض أن team = supervisor hierarchy إلا بعد مراجعة العلاقات الموجودة فعلياً في:
+Do not assume that team means supervisor hierarchy until the actual relationships are reviewed:
 
 - User
 - Claim
@@ -263,9 +263,9 @@ show_claim + scope=onlyme
 
 ---
 
-# 6. الشكل النهائي المتوقع للـ Permission JSON
+# 6. Expected User Permission JSON
 
-مثال `show_claim`:
+Example: `show_claim`
 
 ### All
 
@@ -300,7 +300,7 @@ show_claim + scope=onlyme
 }
 ```
 
-ولو permission يدعم approval أيضاً:
+If the permission also supports approval:
 
 ```json
 {
@@ -314,9 +314,9 @@ show_claim + scope=onlyme
 
 ---
 
-# 7. أهم قاعدة في التصميم
+# 7. Core Design Rule
 
-يجب ألا نخلط بين:
+Do not mix:
 
 ```text
 Permission capability
@@ -325,7 +325,7 @@ Data filtering
 Approval workflow
 ```
 
-التصميم يكون:
+The model is:
 
 ```text
 GeneralPermission
@@ -342,13 +342,13 @@ User Permission
 
 ---
 
-# 8. كيف تدخل الميزة إلى النظام بدون breaking changes؟
+# 8. How to Introduce the Feature Without Breaking Changes
 
-التطبيق يجب أن يكون تدريجياً.
+The rollout should be incremental.
 
-## المرحلة 1 — Metadata
+## Phase 1 — Metadata
 
-نضيف `scope` إلى `permission_mode` فقط للـ permissions التي تحتاج data visibility.
+Add `scope` to `permission_mode` only for permissions that require data visibility.
 
 مثال:
 
@@ -361,13 +361,13 @@ User Permission
 ],
 ```
 
-ولا نغير باقي permissions.
+Do not change the remaining permissions.
 
 ---
 
-## المرحلة 2 — Scope Constants / Enum
+## Phase 2 — Scope Constants / Enum
 
-يجب عدم نشر strings مثل:
+Do not spread strings such as:
 
 ```text
 all
@@ -375,9 +375,9 @@ onlyme
 team
 ```
 
-في كل المشروع.
+throughout the project.
 
-الأفضل إنشاء Enum أو Constants مركزية:
+Prefer a centralized Enum or Constants:
 
 ```php
 enum PermissionScope: string
@@ -388,13 +388,13 @@ enum PermissionScope: string
 }
 ```
 
-وبذلك يصبح التحقق موحداً.
+This keeps validation consistent.
 
 ---
 
-## المرحلة 3 — Permission Resolver
+## Phase 3 — Permission Resolver
 
-يجب إنشاء helper/service مركزي مسؤول عن قراءة permission configuration.
+Create a centralized helper/service responsible for resolving permission configuration.
 
 مثال conceptual:
 
@@ -408,7 +408,7 @@ $permission = permission_value(
 $scope = $permission['scope'] ?? null;
 ```
 
-ويفضل أن يكون هناك resolver واضح مثل:
+Prefer a clear resolver such as:
 
 ```text
 PermissionResolver
@@ -417,13 +417,13 @@ PermissionResolver
     └── requiresApproval()
 ```
 
-بدلاً من قراءة JSON مباشرة في Controllers.
+instead of reading permission JSON directly in Controllers.
 
 ---
 
-# 9. تطبيق Scope على Query
+# 9. Applying Scope to Queries
 
-الـ scope لا يجب أن يكون مسؤولية الـ Controller.
+Scope should not be implemented directly in Controllers.
 
 بدلاً من:
 
@@ -435,7 +435,7 @@ if ($scope === 'onlyme') {
 }
 ```
 
-داخل كل Controller، الأفضل أن يكون هناك Query/Service layer مسؤول عن تطبيق الـ visibility.
+Instead, use a centralized Query/Service layer responsible for applying visibility.
 
 Conceptual example:
 
@@ -449,7 +449,7 @@ $query = $claimVisibility->apply(
 );
 ```
 
-والـ service يقرر:
+The service decides:
 
 ```text
 all
@@ -464,17 +464,17 @@ team
 
 ---
 
-# 10. لا تعتمد على Policy وحدها
+# 10. Do Not Rely on Policies Alone
 
-الـ Policy يمكن أن تتحقق من:
+A Policy can verify:
 
 ```text
 Can user access this specific claim?
 ```
 
-لكن الـ list/index يحتاج Query Scope حتى لا يتم تحميل records غير مسموح بها أصلاً.
+However, list/index endpoints need query-level filtering so unauthorized records are never loaded in the first place.
 
-القاعدة:
+Rule:
 
 ```text
 Index/List
@@ -492,16 +492,16 @@ Approval
 
 ---
 
-# 11. حماية الـ Show endpoint
+# 11. Protecting the Show Endpoint
 
-إذا كان المستخدم لديه:
+If the user has:
 
 ```text
 show_claim = granted
 scope = onlyme
 ```
 
-فلا يكفي أن نتحقق من:
+It is not enough to check:
 
 ```php
 granted === 1
@@ -513,9 +513,9 @@ granted === 1
 Claim::findOrFail($id)
 ```
 
-لأن ذلك يسمح للمستخدم بالوصول إلى claim خارج scope.
+Otherwise, the user could access a claim outside their scope.
 
-يجب أن يصبح الوصول منطقياً مثل:
+The access flow should be:
 
 ```text
 Find claim
@@ -529,41 +529,41 @@ Check claim belongs to allowed scope
 Return claim
 ```
 
-أو الأفضل أن يتم ذلك من خلال query constrained من البداية.
+Preferably, enforce this through a constrained query from the beginning.
 
 ---
 
-# 12. التعامل مع المستخدمين الحاليين
+# 12. Handling Existing Users
 
-هذه نقطة مهمة جداً لتجنب breaking existing behavior.
+هذه نقطة Importantة جداً لتجنب breaking existing behavior.
 
-الـ permissions القديمة لا تحتوي على `scope`.
+Existing permissions do not contain `scope`.
 
-لذلك يجب تحديد default behavior.
+Therefore, default behavior must be explicitly defined.
 
-الخيار الأكثر أماناً للـ rollout:
+The safest rollout rule is:
 
 ```text
 permission لا يدعم scope
     → current behavior remains unchanged
 ```
 
-أما permission يدعم scope مثل `show_claim`، فيجب تحديد default صريح عند migration/seeding.
+For a permission that supports scope, such as `show_claim`, an explicit default should be defined during migration/seeding.
 
-لا يجب أن نضع:
+Do not use:
 
 ```scope = null
 ```
 
-ثم نفترض معناه في أكثر من مكان.
+and assign different meanings to it across the system.
 
-يفضل أن يكون default واضحاً ومكتوباً في الـ design.
+The default should be explicit and documented.
 
 ---
 
-# 13. Admin behavior
+# 13. Admin Behavior
 
-حالياً الـ Admin يتم إعطاؤه:
+Currently, Admin is granted:
 
 ```json
 {
@@ -571,15 +571,15 @@ permission لا يدعم scope
 }
 ```
 
-والـ seeder يضيف:
+The seeder adds:
 
 ```json
 "with_approve": 0
 ```
 
-للـ permissions التي تدعم approval.
+for permissions that support approval.
 
-عند إضافة scope، يجب تحديد scope الأدمن بشكل صريح.
+When Scope is introduced, the Admin scope should be explicit.
 
 مثلاً:
 
@@ -592,15 +592,15 @@ permission لا يدعم scope
 }
 ```
 
-إذا كان الـ business rule يقول إن Super Admin يرى كل شيء.
+if the business rule is that Super Admin can see everything.
 
-ولا يجب ترك scope غير موجود ثم الاعتماد على fallback غير واضح.
+Do not leave scope undefined and rely on an implicit fallback.
 
 ---
 
 # 14. Validation
 
-عند إنشاء/تعديل User Permission يجب منع:
+When creating or updating a User Permission, reject:
 
 ```text
 scope = anything_else
@@ -614,7 +614,7 @@ scope = branch
 scope = random
 ```
 
-والـ allowed values تكون:
+The allowed values are:
 
 ```text
 all
@@ -622,7 +622,7 @@ onlyme
 team
 ```
 
-ويجب أيضاً التحقق أن الـ permission نفسه يدعم scope قبل قبول قيمة scope.
+Also verify that the permission itself supports Scope before accepting a scope value.
 
 مثلاً:
 
@@ -640,7 +640,7 @@ create_claim
 
 # 15. Backward Compatibility
 
-التعديل يجب ألا يغير:
+The change must not alter:
 
 - permissions الحالية
 - approval workflow
@@ -648,9 +648,9 @@ create_claim
 - existing role checks
 - business status rules
 
-إلا في الـ permissions التي يتم explicitly enabling `scope`.
+except for permissions where `scope` is explicitly enabled.
 
-وبالتالي يمكن rollout تدريجي:
+This enables a gradual rollout:
 
 ```text
 Phase 1
@@ -676,13 +676,13 @@ Phase 6
 
 # 16. Testing Strategy
 
-يجب اختبار كل scope على مستوى الـ Query والـ endpoint.
+Every scope must be tested at both query and endpoint level.
 
 ## show_claim
 
 ### all
 
-User يستطيع رؤية:
+The user can see:
 
 ```text
 claim A
@@ -693,13 +693,13 @@ claim C
 
 ### onlyme
 
-User يستطيع رؤية:
+The user can see:
 
 ```text
 claims assigned to user
 ```
 
-ولا يستطيع رؤية:
+The user cannot see:
 
 ```text
 claims assigned to another user
@@ -707,7 +707,7 @@ claims assigned to another user
 
 ### team
 
-User يستطيع رؤية:
+The user can see:
 
 ```text
 own claims
@@ -715,7 +715,7 @@ own claims
 team members' claims
 ```
 
-ولا يستطيع رؤية:
+The user cannot see:
 
 ```text
 claims outside the team
@@ -725,11 +725,11 @@ claims outside the team
 
 # 17. Security Rules
 
-يجب اعتبار scope جزءاً من authorization boundary وليس مجرد UI filter.
+Scope must be treated as part of the authorization boundary, not merely a UI filter.
 
-لا يكفي إخفاء records من frontend.
+Hiding records in the frontend is not sufficient.
 
-يجب أن يكون enforcement في backend.
+Enforcement must happen in the backend.
 
 أي:
 
@@ -782,9 +782,9 @@ Backend scope enforcement = Security
 
 # 19. Recommended Implementation Order in RCP
 
-لا يتم تعديل كل الـ policies والcontrollers مرة واحدة.
+Do not modify all Policies and Controllers at once.
 
-الترتيب المقترح:
+Recommended order:
 
 1. Define `PermissionScope` enum.
 2. Update `permission_mode` to the configuration-map structure.
@@ -816,13 +816,13 @@ Possible interpretations:
 
 This must be taken from the actual User/Claim relationships in the code.
 
-**Do not implement `team` based on assumption.**
+**Do not implement `team` based on an assumption.**
 
 ---
 
 # 21. Final Recommendation
 
-التصميم النهائي المقترح هو:
+The final recommended design is:
 
 ```php
 [
@@ -835,7 +835,7 @@ This must be taken from the actual User/Claim relationships in the code.
 ],
 ```
 
-ولـ permission يدعم Scope + Approval:
+For a permission supporting Scope + Approval:
 
 ```php
 [
@@ -849,7 +849,7 @@ This must be taken from the actual User/Claim relationships in the code.
 ],
 ```
 
-والـ User Permission يحتفظ بالقيمة المختارة:
+The User Permission stores the selected value:
 
 ```json
 {
@@ -860,33 +860,33 @@ This must be taken from the actual User/Claim relationships in the code.
 }
 ```
 
-### لماذا هذا هو الشكل المناسب؟
+### Why is this the right structure?
 
-لأن الـ GeneralPermission يصبح مسؤولاً عن تعريف:
+GeneralPermission becomes responsible for defining:
 
 - الـ permission نفسه.
 - الـ modes التي يدعمها.
 - القيم المسموحة لكل mode.
 
-بينما User Permission يصبح مسؤولاً عن:
+User Permission becomes responsible for:
 
-- هل الصلاحية ممنوحة؟
-- ما Scope التي تم اختيارها؟
-- هل يحتاج الإجراء إلى approval؟
+- Whether the permission is granted
+- Which Scope was selected
+- Whether the action requires approval
 
-### ملاحظة تنفيذية مهمة
+### ملاحظة تنفيذية Importantة
 
-الكود الحالي يحتوي على permissions تستخدم `permission_mode` بالشكل القديم مثل:
+The current codebase contains permissions using the legacy `permission_mode` format, such as:
 
 ```php
 ['with_approve']
 ```
 
-لذلك لا يجب تغيير الـ schema ثم ترك الـ consumers الحالية كما هي.
+Therefore, the schema must not be changed without updating the existing consumers.
 
-يجب أولاً إضافة **Normalization/Resolver** مركزي يفهم الشكل الحالي والجديد، ثم يتم تحديث الـ seeder والـ permission resolution تدريجياً.
+First, add a centralized **Normalization/Resolver** that understands both the legacy and new structures, then update the seeder and permission resolution incrementally.
 
-بهذا نحافظ على الـ backward compatibility ونمنع اختلاف تفسير `permission_mode` بين أجزاء النظام.
+This preserves backward compatibility and prevents different parts of the system from interpreting `permission_mode` differently.
 
 ---
 
