@@ -49,51 +49,76 @@ with_approve  = Approval Workflow
 
 ### الإجابة
 
-**نعم، يمكن تقنياً، لكن لا أنصح بهذا الشكل كتصميم نهائي.**
+**نعم. هذا هو الشكل الأنسب للتصميم المقصود، مع ملاحظة أن الكود الحالي يحتاج إلى تعديل طريقة قراءة `permission_mode`.**
 
-السبب أن النظام الحالي يتعامل مع `permission_mode` على أنه **array of mode names**:
-
-```php
-['with_approve']
-```
-
-والـ seeder الحالي يفحصه هكذا:
-
-```php
-in_array('with_approve', $modes ?? [])
-```
-
-إذا أصبح الشكل:
+في هذا التصميم، `permission_mode` لا يكون مجرد list لأسماء الـ modes، بل يصبح **configuration map**:
 
 ```php
 [
-    'scope' => ['onlyme', 'all', 'team']
+    'scope' => ['onlyme', 'all', 'team'],
 ]
 ```
 
-فلن يعمل هذا الفحص بشكل طبيعي مع التصميم الحالي، وسيصبح `permission_mode` أحياناً list وأحياناً associative array.
+أي أن:
 
----
+- `scope` = الـ mode الذي يدعمه الـ permission.
+- `['onlyme', 'all', 'team']` = القيم المسموحة لهذا الـ mode.
+- عند إسناد permission للمستخدم يتم اختيار **Scope واحدة فقط**.
 
-# 3. التصميم الموصى به
-
-نحافظ على `permission_mode` كـ **list of supported modes**:
+مثال:
 
 ```php
 [
     'permission' => 'show_claim',
-    'permission_mode' => ['scope'],
+    'permission_mode' => [
+        'scope' => ['onlyme', 'all', 'team'],
+    ],
     'type' => PermissionEnum::PUBLIC->value,
     'path' => 'claims',
 ],
 ```
 
-ولو permission يدعم الاثنين:
+ثم User Permission:
+
+```json
+{
+  "show_claim": {
+    "granted": 1,
+    "scope": "team"
+  }
+}
+```
+
+هذا يعني أن الـ GeneralPermission يعرّف **الخيارات المتاحة**، بينما User Permission يخزن **الاختيار الفعلي**.
+
+---
+
+# 3. التصميم الموصى به
+
+الـ `permission_mode` المستهدف يكون configuration map.
+
+Permission يدعم Scope:
+
+```php
+[
+    'permission' => 'show_claim',
+    'permission_mode' => [
+        'scope' => ['onlyme', 'all', 'team'],
+    ],
+    'type' => PermissionEnum::PUBLIC->value,
+    'path' => 'claims',
+],
+```
+
+ولو permission يدعم Scope و Approval معاً:
 
 ```php
 [
     'permission' => 'some_claim_action',
-    'permission_mode' => ['with_approve', 'scope'],
+    'permission_mode' => [
+        'scope' => ['onlyme', 'all', 'team'],
+        'with_approve' => true,
+    ],
     'type' => PermissionEnum::PUBLIC->value,
     'path' => 'claims',
 ],
@@ -124,24 +149,42 @@ What value was assigned to this user?
 
 ---
 
-# 4. لماذا لا نضع allowed values داخل permission_mode؟
+# 4. لماذا نضع allowed values داخل permission_mode؟
 
-لو كتبنا:
+لأن الهدف هنا هو أن يكون تعريف الـ GeneralPermission هو **مصدر الحقيقة للخيارات المسموحة**.
 
 ```php
 'permission_mode' => [
-    'scope' => ['onlyme', 'all', 'team']
+    'scope' => ['onlyme', 'all', 'team'],
 ]
 ```
 
-فالـ database field سيصبح يحمل **metadata + configuration values** في نفس المستوى.
-
-بينما المطلوب فعلياً هو:
+تعني:
 
 ```text
-permission_mode = supported capabilities
-scope           = selected value
+scope
+    ├── onlyme
+    ├── all
+    └── team
 ```
+
+بينما User Permission يخزن قيمة واحدة فقط:
+
+```json
+"scope": "team"
+```
+
+وبالتالي:
+
+```text
+GeneralPermission
+    → ما هي القيم المسموحة؟
+
+User Permission
+    → ما القيمة التي تم اختيارها لهذا المستخدم؟
+```
+
+وهذا يجعل الـ permission definition مسؤولاً عن validation أيضاً، بدلاً من تكرار قائمة scopes في أماكن متعددة.
 
 مثال:
 
@@ -704,7 +747,9 @@ Backend scope enforcement = Security
 ```json
 {
   "permission": "show_claim",
-  "permission_mode": ["scope"],
+  "permission_mode": {
+    "scope": ["onlyme", "all", "team"]
+  },
   "type": "public",
   "path": "claims"
 }
@@ -742,7 +787,7 @@ Backend scope enforcement = Security
 الترتيب المقترح:
 
 1. Define `PermissionScope` enum.
-2. Keep `permission_mode` as a flat list: `['scope']`.
+2. Update `permission_mode` to the configuration-map structure.
 3. Add `scope` support only to selected permissions.
 4. Extend permission assignment/resolution to support `scope`.
 5. Define the exact meaning of `onlyme`.
@@ -777,40 +822,76 @@ This must be taken from the actual User/Claim relationships in the code.
 
 # 21. Final Recommendation
 
-The recommended syntax is:
+التصميم النهائي المقترح هو:
 
 ```php
 [
     'permission' => 'show_claim',
-    'permission_mode' => ['scope'],
+    'permission_mode' => [
+        'scope' => ['onlyme', 'all', 'team'],
+    ],
     'type' => PermissionEnum::PUBLIC->value,
     'path' => 'claims',
 ],
 ```
 
-وليس:
+ولـ permission يدعم Scope + Approval:
 
 ```php
-'permission_mode' => [
-    'scope' => ['onlyme', 'all', 'team']
-]
+[
+    'permission' => 'some_claim_action',
+    'permission_mode' => [
+        'scope' => ['onlyme', 'all', 'team'],
+        'with_approve' => true,
+    ],
+    'type' => PermissionEnum::PUBLIC->value,
+    'path' => 'claims',
+],
 ```
 
-لأن الأولى تحافظ على semantics الحالية للـ `permission_mode`، بينما الثانية تخلط بين **mode** و **mode options**.
+والـ User Permission يحتفظ بالقيمة المختارة:
 
-القيم:
-
-```text
-onlyme
-all
-team
+```json
+{
+  "show_claim": {
+    "granted": 1,
+    "scope": "team"
+  }
+}
 ```
 
-يجب أن تكون جزءاً من تعريف/validation خاص بالـ Scope، بينما `permission_mode` يحدد فقط أن الـ permission يدعم Scope.
+### لماذا هذا هو الشكل المناسب؟
+
+لأن الـ GeneralPermission يصبح مسؤولاً عن تعريف:
+
+- الـ permission نفسه.
+- الـ modes التي يدعمها.
+- القيم المسموحة لكل mode.
+
+بينما User Permission يصبح مسؤولاً عن:
+
+- هل الصلاحية ممنوحة؟
+- ما Scope التي تم اختيارها؟
+- هل يحتاج الإجراء إلى approval؟
+
+### ملاحظة تنفيذية مهمة
+
+الكود الحالي يحتوي على permissions تستخدم `permission_mode` بالشكل القديم مثل:
+
+```php
+['with_approve']
+```
+
+لذلك لا يجب تغيير الـ schema ثم ترك الـ consumers الحالية كما هي.
+
+يجب أولاً إضافة **Normalization/Resolver** مركزي يفهم الشكل الحالي والجديد، ثم يتم تحديث الـ seeder والـ permission resolution تدريجياً.
+
+بهذا نحافظ على الـ backward compatibility ونمنع اختلاف تفسير `permission_mode` بين أجزاء النظام.
 
 ---
 
 # 22. Target Architecture
+
 
 ```text
                     GeneralPermission
