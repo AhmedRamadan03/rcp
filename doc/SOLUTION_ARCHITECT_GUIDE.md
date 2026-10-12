@@ -430,3 +430,290 @@ Treat the guide as a working document. As you verify a section against code and 
 ---
 
 **Core principle:** A Solution Architect is accountable for the quality of the decision and the path to a safe outcome—not just the diagram, code pattern, or technology choice.
+
+
+# Repository-specific audit update — 2026-10-12
+
+This section supersedes the earlier generic review checklist wherever a finding below is more specific. The baseline is `main` commit `0c1ed664c3273ac8f7c84599cdf594e9bf136593`. The guide branch is documentation-only and must not be merged as a code fix.
+
+## 14. Repository inventory and audit boundaries
+
+The recursive Git tree for `main` contains **1,520 tracked paths** (1,270 PHP files, 195 migration files, 39 seeders, plus configuration, routes, tests, deployment workflows, documentation, language files, static assets, generated assets and templates). The tree was not truncated.
+
+Architecture-bearing areas identified:
+
+- `app/Http/Controllers`: 78 files, including API V1, claim, payment, risk, partner and file endpoints.
+- `app/Models`: 62 files, including claims, payments, permissions, files, partner credentials, targets and risk history.
+- `app/Services`: 81 files, including claim workflows, payment gateway, file handling, permissions, reporting and risk calculation.
+- `app/Jobs`: 31 files, including imports, exports, cloud file synchronization and risk calculation.
+- `app/Policies`: 43 files.
+- `app/Http/Middleware`: 21 files.
+- `app/Http/Requests`: 72 files.
+- `app/Http/Resources`: 40 files.
+- `database/migrations`: 195 files.
+- `database/seeders`: 39 files.
+- `routes`: 28 files.
+- `config`: 20 files.
+- `tests`: 19 tracked files.
+- `.github/workflows`: 8 workflow files.
+
+**Evidence boundary:** the inventory covers every tracked path, and the implementation review inspected the main architectural entry points and critical cross-cutting paths (routing, authentication, policies, partner API, payment webhook/status reconciliation, files, queue configuration, risk scoring, core claim model/service, migrations, tests, deployment and observability). This is not a line-by-line manual correctness certification of every legacy controller, every language file, every static asset or every migration. The GitHub connector does not execute the project; no local PHPUnit run, production configuration inspection, penetration test, load test or live provider test was performed. Findings below are therefore classified by evidence and verification need rather than presented as a production certification.
+
+## 15. Actual RCP architecture and runtime boundaries
+
+### 15.1 Framework and application shape
+
+- `composer.json` declares PHP `^8.4` and Laravel `^13.0`.
+- The application is a Laravel modular monolith with API V1 routes, Eloquent models, controllers, services/actions, policies, jobs/events/listeners and integrations. There is no evidence in the inspected runtime configuration that the whole application is already split into independently deployed business microservices.
+- A separate payment microservice is called over HTTP through `PaymentMicroservice`; this is a real service boundary. ELM, SMS, IVR/Maqsam, mail, Google Cloud Storage and PDF/Excel/browser tooling are other integration or infrastructure boundaries.
+- The codebase includes both API endpoints and Blade/Livewire-oriented UI/PDF/mail views. It is not strictly an API-only repository even though the business API is the central interface.
+- The route entry point is `routes/api.php`; it includes `routes/api/clientapi.php` and `routes/api/base.php`. The latter contains the authenticated application route groups. Broadcasting routes use Sanctum authentication.
+- The project has ART, GIG and RCP deployment workflow variants. The deployment workflow selects environment secrets and deployment directories per environment/brand.
+
+### 15.2 Tenant/client model — important distinction
+
+The application contains `client_id` fields and client relationships. The partner API credential model also stores `client_id`. However, the inspected database configuration selects one default connection using `DB_CONNECTION`; no dynamic per-request connection-switching resolver was found in the inspected bootstrap/config path. The partner claim filter's own comment says client scoping was removed for a single-tenant database.
+
+The project operating constraint communicated by the team is **database-per-client / separate client deployments**. The architecture should therefore currently be documented as **deployment/database isolation per client**, not as proven runtime database-per-tenant switching inside one shared Laravel process. Confirm this against the deployment secret, actual database endpoints, and infrastructure inventory.
+
+Architectural consequence: code that omits `client_id` filters may be safe only if each deployed application instance can access exactly one client's database. If a future deployment shares a database or credential store between clients, several queries and credential-management endpoints need tenant scoping before that topology is safe. Do not mix these two tenancy models in design discussions.
+
+### 15.3 Main business capabilities found in routes and source structure
+
+| Capability | Main implementation areas | Architecture concerns |
+|---|---|---|
+| Claims lifecycle | `ClaimController`, `ClaimInfoController`, `ClaimService`, `ClaimStatusActionResolver`, claim actions and history models | State machine consistency, approval rules, concurrency, audit trail, permissions and query visibility |
+| Imports / bulk actions | Claim import services/actions, `ProcessClaimImport*` jobs, failed-import records and commands | Partial success semantics, idempotency, batch sizing, retries, data validation and recovery |
+| Payments / installments | `PaymentService`, `PaymentServiceGateway`, `PaymentMicroservice`, transaction status/enquiry actions, payment models | External truth vs local state, duplicate callbacks, locks, reconciliation and financial auditability |
+| Partner API | `AuthenticatePartnerApi`, partner credentials, `PartnerClaimController`, registration/update services | Credential lifecycle, API contract, client database boundary, per-item bulk failures and audit actor |
+| Files / exports | `FileController`, `AuthorizeFileAccess`, `FilesUploader`, cloud sync job, export jobs | Private-by-default storage, authorization, safe paths, signed URLs, retention and memory use |
+| Authorization | 43 policies, `PermissionService`, `GeneralPermissionSeeder`, `app/helpers.php` | Central permission contract, scope enforcement, legacy JSON compatibility and negative tests |
+| Targets / collectors / delegations | Target services/models, target jobs/commands and supervisor-related routes | Reporting correctness, date boundaries, team membership, query performance and history |
+| Notifications / messages / SMS / IVR | Events/listeners, message/notification/SMS/IVR services and scheduled commands | Retry safety, provider throttling, delivery observability and PII-safe logs |
+| Risk assessment | `ClaimRiskObserver`, `CalculateClaimRiskJob`, `RiskCalculationService`, `RiskController`, `ClaimRiskHistory` | Formula correctness, missing-data policy, queue reliability, access control and rule versioning |
+| Reports / dashboards | Dashboard/report services, query/filter classes and OpenSpout exports | Bounded queries, index strategy, large export lifecycle and consistent filters |
+| Audit / observability | Data/authentication histories, login-attempt tracking, OpenTelemetry and SigNoz docs | Trace correlation, access audit, alert ownership and incident response |
+
+## 16. Verified findings requiring action
+
+These are source-level findings, not claims that exploitation or a production incident has occurred. The first items should be treated as design-review blockers before describing the system as secure.
+
+### Finding A — export-download route is not visibly protected by authentication or file authorization
+
+**Evidence:** `routes/api.php` defines `GET /v1/download-export/exports/{file?}` as an inline closure. Unlike the `show-file` routes, this route does not attach `authorize.file.access`, Sanctum, a policy or a signed-URL middleware in its route definition. It concatenates the supplied path segment into `storage_path('app/public/exports/'.$file)` and passes the resulting relative path to the public disk's `download()`.
+
+**Risk:** if the endpoint is reachable as written, a caller may attempt to download sensitive exports without being authenticated or authorized. Path normalization and traversal must also be handled explicitly rather than trusting a route parameter.
+
+**Required verification/fix:** enumerate every caller of this endpoint; replace arbitrary filename/path handling with a server-generated export record or opaque file UUID; authorize the current user and client/database before streaming; canonicalize and constrain the path to the exports directory; use private storage for sensitive exports; add unauthenticated, cross-user, cross-client and traversal regression tests. Do not assume an unguessable filename is authorization.
+
+### Finding B — payment webhook does not validate the sender in the controller
+
+**Evidence:** `PaymentWebhookController::webhook()` checks only that `event`, `charge_id` and `status` are present, then invokes `TransactionStatusEnquiryAction` using `charge_id`. The controller does not validate a provider signature, shared secret, authenticated sender, timestamp or replay token. The received `event` and `status` are not used to establish payment truth; the action asks the payment microservice for the current status, which is a good source-of-truth direction but does not authenticate the webhook request itself.
+
+**Risk:** an unauthenticated caller can trigger provider-status lookups and downstream processing for known charge identifiers, potentially creating load or unexpected retry pressure. The controller's required fields are not proof that the event came from the provider.
+
+**Required verification/fix:** follow the payment microservice/provider's supported webhook-authentication contract; reject invalid signatures before any status enquiry; use a timestamp/replay policy where supported; rate-limit safely without blocking legitimate provider retries; record correlation IDs without secrets; test forged, duplicate, delayed and out-of-order callbacks. Preserve the downstream transaction-row locks and reconciliation logic, which already attempt to serialize concurrent status checks.
+
+### Finding C — risk recalculation route has a parameter-binding mismatch and weaker authorization than the read route
+
+**Evidence:** `routes/api/claims.php` defines the route as `/{claimId}/risk/recalculate`, while `RiskController::recalculate()` accepts `Claim $claim`. Laravel implicit model binding normally matches the route parameter name to the controller argument; these names do not match. The route applies `auth:sanctum`, but unlike `show()`, the recalculation method does not itself query through `Claim::visibleTo($user)` or explicitly authorize the claim.
+
+**Risk:** recalculation may fail to bind the model correctly; if the route is adjusted without adding resource authorization, any authenticated user could potentially trigger recalculation for a claim they cannot see.
+
+**Required verification/fix:** make route and argument names consistent; resolve the claim through the user's visible-claims query or a policy; add a dedicated permission for manual recalculation if required; test missing claim, invisible claim, allowed claim and role restrictions. Recalculation should not be made functional by fixing binding alone.
+
+### Finding D — risk score currently contains a constant city component
+
+**Evidence:** `RiskCalculationService::calculateCityRiskScore()` returns `30` for every claim. This is a placeholder, not a score derived from city history. The client score counts claims for the same `client_id` and counts only `rejected` and `cancelled` statuses. The claim-history factor counts all earlier claims with the same `debtor_nid`, then adds weighted counts for `rejected`, `cancelled`, `closed` and `manaual_collected`.
+
+**Risk:** the API exposes a city-risk component that appears data-driven but currently contributes a constant neutral value. The client metric does not currently include `closed`. If `debtor_nid` is null, a query for `debtor_nid = null` may group unrelated records with missing identifiers into one apparent history cohort, depending on query/database behavior. The current formula is deterministic but not a validated predictive model.
+
+**Required verification/fix:** label city risk as unavailable/neutral until the agreed city sample threshold and status cohort are implemented; explicitly handle null debtor identifiers; document whether deleted claims count; define status normalization; agree the business formula and threshold policy; add boundary tests and a reproducible example. Do not describe the risk output as a machine-learning prediction or a proven probability of default.
+
+### Finding E — risk history metadata does not distinguish actual triggers
+
+**Evidence:** `ClaimRiskObserver` dispatches a job on claim creation and on updates to a risk-related field. `RiskCalculationService::calculate()` writes every history row with `trigger = 'updated'`, including manual recalculation. The migration allows `created`, `updated`, `manual_recalc` and `status_change`, but the service does not select among these values. The observer dispatches with `auth()->id()`, which can be null for imports, CLI commands or background execution.
+
+**Risk:** history consumers cannot reliably tell why a score was calculated; actor attribution is incomplete for non-HTTP workflows. The job also has three attempts and a 60-second timeout, but production retry/failed-job monitoring still needs verification.
+
+**Required verification/fix:** pass an explicit trigger/source and actor context to the job; distinguish system actor from user actor; add after-commit dispatch or an equivalent transactional-outbox strategy; make repeated execution safe; test create/update/manual/command/import paths; decide whether unchanged risk inputs should create a new history row.
+
+### Finding F — queue reliability depends on environment and current defaults are not safe evidence of production behavior
+
+**Evidence:** `config/queue.php` defaults to `sync` when `QUEUE_CONNECTION` is unset. The database queue connection has `after_commit => false`; the Redis connection also has `after_commit => false`. `.env.example` sets `QUEUE_CONNECTION=sync`. Jobs such as `CalculateClaimRiskJob`, imports, exports and cloud file sync implement `ShouldQueue`, but that interface alone does not prove a real worker runs.
+
+**Risk:** synchronous execution can put heavy work in request latency; asynchronous dispatch before transaction commit can expose a job to uncommitted or rolled-back data. A queue that is configured but not monitored can silently accumulate failures.
+
+**Required verification/fix:** inspect each deployment secret and Supervisor/cron configuration; explicitly configure after-commit behavior or dispatch jobs after commit; define retries/backoff/timeouts, failed-job alerting and replay; verify workers for every environment; test job execution with the production queue driver. Never paste secret environment contents into tickets or logs.
+
+### Finding G — permission architecture is legacy JSON plus per-policy checks; the proposed scope contract is not implemented on main
+
+**Evidence:** `GeneralPermissionSeeder` defines permission keys and currently declares `permission_mode` values such as `with_approve`; it does not define `scope` values `all`, `onlyme` or `team`. `PermissionService` converts request data into per-category JSON and preserves configured mode keys. `get_permission_value()` in `app/helpers.php` supports both scalar legacy values and structured values. `custom_policy()` currently returns the supplied boolean unchanged. The policy set contains explicit permission checks, but some action methods rely on route-level `can:view` middleware for resource visibility rather than checking visibility again inside the action method.
+
+**Risk:** adding scope to the seeder alone will not enforce scope. A future implementation can accidentally show the correct buttons but return broader query results, or protect list routes while leaving detail/export/file/job paths inconsistent. Existing scalar JSON values and old records are a migration/backward-compatibility concern.
+
+**Required verification/fix:** define a central contract for `granted`, approval mode and scope; choose a safe default for existing records; apply query scope before pagination and aggregation; ensure every detail, mutation, export, file and background path follows the same rule; add negative tests for own/team/all and cross-client denial. Keep authorization separate from workflow approval: a permission grant does not automatically mean the action is approved.
+
+### Finding H — partner API credentials have no automatic expiry and client scoping must match the deployment topology
+
+**Evidence:** `AuthenticatePartnerApi` checks `X-Client-Id`, `X-Client-Secret`, active status and a hash check; failures return a generic 401. `PartnerApiCredential` hides the stored secret hash. Credential generation returns the raw secret once and stores only a hash. The controller documentation explicitly states credentials do not expire automatically. The credential listing query shown in `PartnerApiCredentialController` does not itself add a `client_id` filter; the partner claim query is also not visibly constrained by the credential's client ID. The partner update service documents that client scoping was removed for a single-tenant database.
+
+**Risk:** credential lifecycle and data isolation depend on the assumption that each deployed database belongs to one client. If that assumption changes, credential listing/management and partner data access can cross client boundaries. Long-lived credentials increase the impact of a leaked secret.
+
+**Required verification/fix:** document the single-client-per-database invariant as a deployment guardrail; verify database credentials and deployment secrets are unique per client; test revocation and rotation; consider expiry/rotation policy; add client scoping to queries before ever sharing a database or process across clients. Review whether bulk API responses may contain sensitive exception messages.
+
+### Finding I — authorization policies need systematic consistency review
+
+**Evidence:** `ClaimPolicy::viewAny()` returns true, while actual list visibility is expected to be constrained in service/query paths. `ClaimPolicy` mixes permission JSON checks and resource visibility checks; several action methods have comments showing resource checks are expected from route-level middleware. `PermissionPolicy` has several permissive `true` methods with the previous permission check commented out. This may be intentional if route groups and higher-level permissions provide the boundary, but the policy itself does not establish that boundary.
+
+**Risk:** a route added without the matching query scope or second policy can expose a list or mutation unexpectedly. Tests focused only on happy-path roles will miss this.
+
+**Required verification/fix:** build a route-to-policy matrix; test all privileged endpoints as anonymous, low-privilege, same-team, other-team and other-client actors; verify exports and jobs reapply the original actor's scope; remove stale commented policy logic only after confirming intended behavior with the business owner.
+
+### Finding J — risk reporting has avoidable query repetition
+
+**Evidence:** `RiskController::summary()` runs total-count queries more than once and performs separate counts for high/medium/low plus average score. It starts from `Claim::visibleTo($user)`, which is the right direction for visibility.
+
+**Risk:** the summary cost grows with database size and repeats similar filters. It is not necessarily a bottleneck at current volumes, but it should be measured.
+
+**Required verification/fix:** profile with production-like data; use a single aggregate query or grouped conditional aggregates where supported; confirm the database's indexes and query plan; preserve identical visibility filters and percentage semantics.
+
+### Finding K — production observability is documented, but configuration and alerting still need runtime proof
+
+**Evidence:** the repository contains `bootstrap/otel.php`, `bootstrap/otel-env.php`, `EnrichTraceContext`, health/client-error endpoints and SigNoz dashboards/alert documentation. The docs explain that OpenTelemetry environment variables must be present before Composer autoload and that CLI tracing is required for jobs/commands. Workflow variants use different deployment secrets and service names.
+
+**Risk:** code and dashboards can exist while telemetry remains disabled, missing for CLI workers, or pointed at the wrong service. The health route is described as a liveness endpoint, not a full readiness check.
+
+**Required verification/fix:** check actual deployment secrets and worker environment with the operations owner; verify traces for HTTP, PDO, external HTTP, jobs and scheduler; trigger a safe test alert; restrict the unauthenticated OTLP receiver to the internal network; define alert owner/runbook and data-retention policy.
+
+## 17. Deployment and delivery pipeline review
+
+The RCP UAT workflow triggers on pushes to `uat`, checks out the repository, authenticates to GCP through workload identity, connects to a VM through IAP, fetches/resets the selected branch, runs `composer install`, loads the environment from Secret Manager, clears configuration, runs `php artisan migrate --force`, runs selected seeders, optimizes Laravel and restarts Supervisor workers.
+
+Architecture implications:
+
+1. **No PHPUnit step is visible in the inspected RCP UAT deployment workflow before migration/deployment.** A separate CI system may exist outside the tracked workflows, but the repository workflow alone does not demonstrate test-gated deployment.
+2. Migrations are run automatically in the deployment path. Every schema change therefore needs production-safe locking/compatibility review, and rollback must be planned before deployment.
+3. `GeneralPermissionSeeder` and `CategoryMessageVariablesSeeder` are run in UAT deploy. Seeders must be idempotent and safe to rerun against real data.
+4. The workflow performs a hard reset of the deployment checkout and intentionally leaves `git clean -fd` commented out. Confirm which generated/untracked files are expected to persist and ensure secrets/configuration are not accidentally overwritten.
+5. The workflow uses pinned major versions for third-party GitHub Actions, but not immutable commit SHAs. Apply the team's supply-chain policy consistently.
+6. `php.DockerFile` installs PHP extensions, Node, Chromium/Chrome and builds assets, but the provided `docker-compose.yml` only defines the PHP service. The Docker setup should not be confused with the production VM deployment topology.
+7. Validate rollback and recovery operationally: schema changes may not be reversible after new writes; restoring code alone may not restore data consistency.
+
+**Recommended release gate:** automated unit/feature tests → static analysis/format checks → dependency/security checks → migration dry-run or compatibility review → approval → deploy → smoke tests → telemetry verification. Production should have a documented rollback trigger and named release owner.
+
+## 18. Risk Assessment — exact V1 behavior visible on main
+
+### Current calculation contract
+
+The service uses seven weighted components totaling 100%:
+
+| Factor | Weight | Current component behavior |
+|---|---:|---|
+| Claim type | 15% | Individual 20; corporate 40; leasing 35; government 25; municipality 30; fallback 10 |
+| Claim amount | 20% | >=100,000: 100; >=50,000: 80; >=20,000: 60; >=10,000: 40; >=5,000: 25; otherwise 10 |
+| Accident age | 15% | Missing date: 50; >24 months: 90; >12: 70; >6: 40; >3: 20; otherwise 10 |
+| Previous debtor claim history | 15% | Previous claims ×10 plus rejected/cancelled/closed/manual-collected claims ×20, capped at 100 |
+| Debtor type | 20% | Third party 80; insured 20; fallback 50 |
+| City risk | 10% | **Constant 30 placeholder** |
+| Client risk | 5% | Missing client: 30; otherwise rejected/cancelled share ×2, capped at 100 |
+
+The weighted score is the sum of each factor score multiplied by its weight divided by 100, rounded to two decimal places and capped at 100. The model derives levels as **high >=70**, **medium >=30 and <70**, **low <30**. Color and label are derived from the level. The score is persisted on `claims`; factor details are stored as JSON; a history row is created for each calculation.
+
+### Trigger and data flow
+
+```mermaid
+flowchart TD
+    A[Claim created or updated] --> B[ClaimRiskObserver]
+    B --> C{Risk input changed?}
+    C -- No --> D[No recalculation job]
+    C -- Yes --> E[Dispatch CalculateClaimRiskJob]
+    B --> E
+    E --> F[RiskCalculationService]
+    F --> G[Calculate 7 weighted factors]
+    G --> H[Update claims risk fields]
+    H --> I[Insert claim_risk_histories row]
+    I --> J[Risk API: detail / summary]
+```
+
+This flow is the intended observed code path, with the earlier caveats about queue configuration, trigger metadata and transaction timing. The observer dispatches on creation and when these fields change: amount, type, debtor type, accident date, status, city, debtor national ID, claim number and client ID.
+
+### API surface and operational limitations
+
+- Risk detail returns score, level, color, label, factor details, calculation time and history.
+- Summary returns visible claim count, counts by level, average score and high-risk percentage.
+- Manual recalculation exists in route/controller code but has a route-model-binding name mismatch and lacks the same explicit visibility query used by detail.
+- The risk migration creates `risk_score` (default 0), `risk_factors`, `risk_calculated_at`, an index on score and a `claim_risk_histories` table indexed by claim and creation time.
+- The tracked test inventory on `main` contains no dedicated risk-calculation test file. Do not state that risk behavior is covered by a passing test suite on this branch without adding/running those tests.
+- The high-risk label says “mandatory review,” but no automatic claim workflow/approval enforcement was identified in the inspected risk controller/service path. Treat it as presentation text until a business rule is explicitly implemented and tested.
+- The current score is a rule-based heuristic. It is not a calibrated probability, model prediction or independently validated measure of financial loss.
+
+### Minimum acceptance tests before using the score for decisions
+
+- Every factor threshold immediately below, at and above each boundary.
+- Null/missing city, client, accident date and debtor national ID.
+- City sample-size threshold and exact eligible status cohort when city risk is implemented.
+- Client score with 0 claims, 1 claim and rejected/cancelled/closed records.
+- Re-running the same calculation and concurrent jobs.
+- Creation, relevant update, irrelevant update, manual recalculation and status transition.
+- Actor attribution for HTTP, imports, queue jobs and Artisan commands.
+- User visibility, manual-recalculation permission and history visibility.
+- Rollback/failed-job recovery and a backfill plan for existing claims.
+
+## 19. Architecture backlog ranked by risk
+
+| Priority | Work item | Why it comes first | Evidence required to close |
+|---|---|---|---|
+| P0 | Protect export download and constrain file paths | Possible sensitive-data exposure | Route tests proving unauthenticated, unauthorized and traversal requests fail |
+| P0 | Authenticate payment webhooks | External endpoint currently trusts required fields, not sender identity | Valid/invalid signature and replay tests |
+| P0 | Fix and authorize manual risk recalculation | Binding mismatch and missing resource-level visibility check | Route binding + cross-user visibility tests |
+| P1 | Make queue/transaction boundaries explicit | Jobs can run synchronously or before commit depending on environment | Per-environment config proof; after-commit/retry tests |
+| P1 | Complete and explain city-risk policy | City score is constant | Approved business rule, sample threshold, deterministic tests |
+| P1 | Fix null debtor-history behavior and history trigger attribution | Potentially misleading scores/audit history | Null identifier tests and trigger/actor assertions |
+| P1 | Create authorization matrix for all routes/policies | Policy checks and route checks are distributed | Automated negative access tests for roles, team scope and client DB boundary |
+| P1 | Verify partner API tenant invariant | Client credential metadata exists but data queries rely on single-client DB | Infrastructure proof + credential rotation/revocation and isolation tests |
+| P1 | Add test-gated CI before migration | Deployment workflow does not show a PHPUnit gate | CI run proving tests/static checks pass before deployment |
+| P2 | Optimize risk summary aggregation and report queries | Repeated aggregates and large datasets can increase latency | Query plan and benchmark on representative data |
+| P2 | Verify observability end to end | Docs/config are not proof of live telemetry | Example traces for web, jobs and scheduler; alert delivery test |
+| P2 | Document migration/backup/restore and incident runbooks | Operational recovery is part of architecture | Successful rehearsal with owner and recorded timing |
+
+## 20. Architecture review deliverables for future RCP tasks
+
+For any non-trivial feature, attach these to the PR or its design ticket:
+
+1. **Requirement brief:** problem, actors, acceptance criteria, data sensitivity, traffic and latency targets.
+2. **Current-state map:** routes, middleware, controller, service/action, model, jobs/events, integrations and tables affected.
+3. **Sequence diagram:** success path, failures, retries, concurrency and transaction boundaries.
+4. **Options analysis:** at least the smallest safe change and any larger alternative, with cost/complexity/security/rollback trade-offs.
+5. **ADR:** decision, alternatives rejected, assumptions, consequences and review date.
+6. **Security and data-access review:** authentication, permission, resource visibility, client database boundary, files and audit trail.
+7. **Migration and release plan:** expand/contract, backfill, rollout order, monitoring, rollback limitations and owner.
+8. **Test evidence:** unit, feature, integration, negative authorization, retry/concurrency and load tests appropriate to the change.
+9. **Operational readiness:** dashboard, alert, runbook, support owner and recovery procedure.
+10. **Post-release evidence:** metrics and smoke tests compared with the original acceptance criteria.
+
+## 21. Reference map — inspect these first in the repository
+
+- [Main API route map](https://github.com/AhmedRamadan03/rcp/blob/main/routes/api.php)
+- [Claim routes](https://github.com/AhmedRamadan03/rcp/blob/main/routes/api/claims.php)
+- [Partner API routes](https://github.com/AhmedRamadan03/rcp/blob/main/routes/api/clientapi.php)
+- [Claim policy](https://github.com/AhmedRamadan03/rcp/blob/main/app/Policies/ClaimPolicy.php)
+- [Permission service](https://github.com/AhmedRamadan03/rcp/blob/main/app/Services/PermissionService.php)
+- [Permission helpers](https://github.com/AhmedRamadan03/rcp/blob/main/app/helpers.php)
+- [Partner API authentication](https://github.com/AhmedRamadan03/rcp/blob/main/app/Http/Middleware/AuthenticatePartnerApi.php)
+- [File authorization middleware](https://github.com/AhmedRamadan03/rcp/blob/main/app/Http/Middleware/AuthorizeFileAccess.php)
+- [Export/file route definitions](https://github.com/AhmedRamadan03/rcp/blob/main/routes/api.php)
+- [Payment webhook controller](https://github.com/AhmedRamadan03/rcp/blob/main/app/Http/Controllers/Api/V1/PaymentWebhookController.php)
+- [Payment status reconciliation](https://github.com/AhmedRamadan03/rcp/blob/main/app/Actions/TransactionStatusEnquiryAction.php)
+- [Risk controller](https://github.com/AhmedRamadan03/rcp/blob/main/app/Http/Controllers/Api/V1/RiskController.php)
+- [Risk calculation service](https://github.com/AhmedRamadan03/rcp/blob/main/app/Services/Risk/RiskCalculationService.php)
+- [Risk observer](https://github.com/AhmedRamadan03/rcp/blob/main/app/Observers/ClaimRiskObserver.php)
+- [Queue configuration](https://github.com/AhmedRamadan03/rcp/blob/main/config/queue.php)
+- [Storage configuration](https://github.com/AhmedRamadan03/rcp/blob/main/config/filesystems.php)
+- [RCP UAT deployment workflow](https://github.com/AhmedRamadan03/rcp/blob/main/.github/workflows/rcp-uat-deployment.yaml)
+- [Observability guide](https://github.com/AhmedRamadan03/rcp/blob/main/docs/observability/README.md)
+- [PHPUnit configuration](https://github.com/AhmedRamadan03/rcp/blob/main/phpunit.xml)
+
+---
+
+**Final architecture position:** RCP has a substantial, feature-rich Laravel codebase with explicit business services, policies, background jobs, payment integration and observability documentation. The highest-value architect contribution is not a premature rewrite; it is to close the security and correctness gaps above, make permission and database-isolation assumptions explicit, gate releases with tests, and prove production behavior through metrics and recovery drills.
