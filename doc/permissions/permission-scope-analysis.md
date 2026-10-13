@@ -2,8 +2,8 @@
 
 > Status: design / analysis (no code changed). Reviewed against `main` of `rcp`.
 > This document **replaces** the earlier revisions of the same file. The earlier "additive `custom` scope"
-> idea was dropped in favor of the model requested later: **one scope value per permission**, chosen from
-> `onlyme | team | all | users | roles`.
+> idea was dropped in favor of the model requested later: **a scope per permission** chosen from
+> `onlyme | team | all | users | roles` (single value or combination, §3.6).
 
 ---
 
@@ -18,7 +18,7 @@ scope         = Data visibility      (whose data does it apply to?)
 with_approve  = Approval workflow    (does the action need a supervisor's approval?)
 ```
 
-### 1.1 Scope values (exactly one per permission)
+### 1.1 Scope values
 
 | Scope | Data returned | Extra input |
 |-------|---------------|-------------|
@@ -30,9 +30,12 @@ with_approve  = Approval workflow    (does the action need a supervisor's approv
 
 "**My data**" is always included, for every scope except `all` (which already includes it).
 
-### 1.2 Out of scope (explicit non-goals)
+### 1.2 Combining scopes
 
-- Combining several scope types in one grant (e.g. `roles` + `users`). One value per permission keeps the model, UI and validation simple. A later extension is described in §14.
+A grant may combine several scope types, e.g. **role 1 + users 12 and 15 (who are not in role 1)**. Details in §3.6. A single value (`"scope": "roles"`) remains valid and means the same as before.
+
+### 1.3 Out of scope (explicit non-goals)
+
 - Recursive hierarchies (team of my team). `team` stays one level, exactly as today.
 - Changing approval flow, delegation rules, Partner API auth, or per-action policies.
 
@@ -189,6 +192,46 @@ GET /claims
 
 ---
 
+### 3.6 Combining scopes (e.g. role 1 **plus** extra users outside that role)
+
+**Yes, this works, and it costs almost nothing** because every scope already resolves to "a list of user ids". A combination is
+simply the **union** of those lists (plus my own id).
+
+Stored shape (the single-value shape from §3.1 stays valid and is normalized to this by `VisibilityScope::normalize()`):
+
+```json
+{
+  "show_claim": {
+    "granted": 1,
+    "scope": ["roles", "users"],
+    "scope_ids": { "roles": [1], "users": [12, 15] }
+  }
+}
+```
+
+Meaning: **my data + everyone holding role 1 + users 12 and 15** (even if 12/15 are not in role 1). Other examples:
+
+| Grant | Result |
+|-------|--------|
+| `["team","roles"]`, roles `[1]` | me + my subordinates + role 1 holders |
+| `["roles","users"]`, roles `[1]`, users `[12,15]` | me + role 1 holders + users 12, 15 |
+| `["team","users"]`, users `[40]` | me + my subordinates + user 40 |
+| `"roles"` (string, legacy shape) + `scope_ids:[1]` | me + role 1 holders (same as §3.1) |
+
+Rules:
+
+1. `all` is **exclusive**: if present it wins (and validation rejects `all` combined with others, to avoid confusing grants).
+2. `onlyme` is implied (my data is always included); accepted but redundant, and validation rejects it combined with others.
+3. Duplicates are removed (`array_unique`); a user matched by role *and* listed in `users` appears once.
+4. `scope_ids` is keyed by scope when the scope is an array; a plain list is accepted only for the single-string form.
+5. Each scope in the combination follows the same defaults/fail-closed rules as §3.2 (invalid scope → `onlyme`; empty ids → contributes nothing).
+6. Cost: still **one** `assignings.to IN (...)` filter; extra queries = number of *role-based* scopes in the combination (usually 1).
+
+Why decide this now: the stored shape is the only part that is expensive to change later (it sits in user rows). Supporting both
+shapes from day one costs ~15 lines in `normalize()`; adding it later would require a data migration.
+
+---
+
 ## 4. Implementation (exact code changes)
 
 Total: **2 new small classes + 1 enum, 5 small edits, 1 seeder line, tests**. No new tables, no migration of user data, no new endpoints.
@@ -242,6 +285,8 @@ final class PermissionModes
 
 ### 4.3 New: `VisibilityScope` resolver
 
+Supports one scope or a combination (union). `normalize()` is the only place that understands both storage shapes (§3.6).
+
 ```php
 namespace App\Services\Permissions;
 
@@ -250,29 +295,62 @@ use App\Models\User;
 
 final class VisibilityScope
 {
+    /**
+     * Normalize stored value to ['scopes' => PermissionScope[], 'ids' => [scope => int[]]].
+     * Accepts: "roles" + scope_ids:[3]   |   ["roles","users"] + scope_ids:{"roles":[3],"users":[12]}
+     */
+    public static function normalize(mixed $perm): array
+    {
+        $raw    = is_array($perm) ? ($perm['scope'] ?? null) : null;
+        $rawIds = is_array($perm) ? ($perm['scope_ids'] ?? []) : [];
+
+        if ($raw === null || ! config('permissions.scope_enabled', true)) {
+            return ['scopes' => [PermissionScope::TEAM], 'ids' => []];     // legacy / switched off
+        }
+
+        $names  = is_array($raw) ? $raw : [$raw];
+        $scopes = [];
+        $ids    = [];
+
+        foreach ($names as $name) {
+            $scope = PermissionScope::tryFrom((string) $name);
+            if (! $scope) { return ['scopes' => [PermissionScope::ONLY_ME], 'ids' => []]; }   // invalid => fail closed
+
+            $scopes[] = $scope;
+            if ($scope->ids() !== 'none') {
+                // legacy single-scope shape: scope_ids is a plain list
+                $list = array_is_list((array) $rawIds) && ! is_array($raw) ? (array) $rawIds : ($rawIds[$scope->value] ?? []);
+                $ids[$scope->value] = array_values(array_unique(array_filter(array_map('intval', $list))));
+            }
+        }
+
+        return ['scopes' => $scopes, 'ids' => $ids];
+    }
+
     /** @return int[]|null  null = unrestricted (scope all) */
     public static function assigneeIds(User $user, mixed $perm): ?array
     {
-        $scope = is_array($perm) ? ($perm['scope'] ?? null) : null;
+        ['scopes' => $scopes, 'ids' => $ids] = self::normalize($perm);
 
-        // legacy users (no key) or feature switched off => today's behavior
-        if ($scope === null || ! config('permissions.scope_enabled', true)) {
-            $scope = PermissionScope::TEAM->value;
+        if (in_array(PermissionScope::ALL, $scopes, true)) {
+            return null;                                              // all wins over everything
         }
 
-        $ids = array_values(array_filter(array_map('intval', (array) ($perm['scope_ids'] ?? []))));
+        $result = [$user->id];                                        // "my data" is always included
 
-        return match (PermissionScope::tryFrom((string) $scope)) {
-            PermissionScope::ALL     => null,
-            PermissionScope::ONLY_ME => [$user->id],
-            PermissionScope::TEAM    => [...$user->subordinates()->pluck('id')->all(), $user->id],
-            PermissionScope::USERS   => array_values(array_unique([$user->id, ...$ids])),
-            PermissionScope::ROLES   => $ids === [] ? [$user->id] : array_values(array_unique([
-                $user->id,
-                ...User::query()->whereIn('role_id', $ids)->pluck('id')->all(),   // soft-deleted excluded
-            ])),
-            default                  => [$user->id],   // invalid value => fail closed
-        };
+        foreach ($scopes as $scope) {
+            $result = [...$result, ...match ($scope) {
+                PermissionScope::ONLY_ME => [],
+                PermissionScope::TEAM    => $user->subordinates()->pluck('id')->all(),
+                PermissionScope::USERS   => $ids['users'] ?? [],
+                PermissionScope::ROLES   => ($ids['roles'] ?? []) === [] ? []
+                    : User::query()->whereIn('role_id', $ids['roles'])->pluck('id')->all(),   // soft-deleted excluded
+                PermissionScope::EXTERNAL_USERS => [],                // see §14.1
+                default                  => [],
+            }];
+        }
+
+        return array_values(array_unique($result));
     }
 }
 ```
@@ -299,6 +377,8 @@ if ($assigneeIds === null) { return $query; }                   // scope = all
 ```
 
 ### 4.5 Edit: `PermissionService::create()`
+
+> Written for the single-string shape for clarity. For combinations, pass `$value['scope']` / `$value['scope_ids']` through `VisibilityScope::normalize()` after validation and store the normalized result (string form when only one scope, array form otherwise).
 
 Replace the `foreach ($allowed_modes as $mode)` blocks with the normalizer, keep flags as ints, and store scope **as a string + id array** (today everything is cast to `(int)`):
 
@@ -328,6 +408,8 @@ if (is_array($value)) {
 ```
 
 ### 4.6 Edit: `PermissionUpdateRequest::withValidator` (existing hook)
+
+> Accept `scope` as a string **or** an array of strings. When an array, `scope_ids` must be an object keyed by scope. Reject `all` / `onlyme` combined with other scopes. Validate each key's ids against `idsTable()` (§14.1).
 
 For any entry that carries `scope`:
 
@@ -459,7 +541,9 @@ With `false`, every user resolves to `team` (legacy) regardless of stored scopes
 
 | Case | Behavior |
 |------|----------|
-| `users`/`roles` with empty `scope_ids` | `onlyme` |
+| `users`/`roles` with empty `scope_ids` | contributes nothing (alone → `onlyme`) |
+| `["roles","users"]`, user listed and also in the role | visible once (de-duplicated) |
+| `["all", ...others]` | rejected at write; if stored, `all` wins |
 | `scope_ids` contains my own id | de-duplicated |
 | Selected user soft-deleted | their claims remain visible only if still actively assigned to that id; role-resolved lists exclude deleted users automatically |
 | User changes role | `roles` scopes reflect it on next request |
@@ -482,6 +566,9 @@ Extend `tests/Unit/ClaimServiceListVisibilityTest.php` (already builds users/ass
 | `onlyme` | own (A/B/C) only; **not** subordinates' |
 | `team` | own + subordinates' (today) |
 | `users=[B]` | own + B's; not C's |
+| `["roles","users"]` roles=[1], users=[12,15] | own + role 1 holders + 12 + 15; not others |
+| `["team","roles"]` | own + subordinates + role holders |
+| Single-string shape vs. equivalent array shape | identical results |
 | `roles=[R]` | own + all active users with role R; role change/soft-delete reflected |
 | `all` via scope | no filter |
 | `show_all_claims=1` + any scope | all |
@@ -558,7 +645,7 @@ The resolver returns a **list of user ids** (or `null` = all). Each data domain 
 
 Enabling another permission = add `'permission_mode' => ['scope' => [...]]` in the seeder + one `->whereIn(...)` using `VisibilityScope::assigneeIds()`. The hard-coded role logic in `DashboardController::checkUserIds` is the natural first candidate, but it is intentionally **not** touched now.
 
-If a later requirement needs combinations (e.g. `roles` + `users`), the shape can evolve to `"scope": ["roles","users"], "scope_ids": {"roles":[3], "users":[12]}`; the resolver then returns the union. Not needed now.
+Combinations (e.g. `roles` + `users`) are already supported from Phase 1 (§3.6).
 
 ---
 
@@ -651,7 +738,7 @@ against `idsTable()`; the resolver stays the only place with business logic. A n
 |-----------|-----------|
 | Based on a **user attribute** (`user_type`, `client_id`, `role_id`, `supervisor_id`) | Resolver arm only |
 | Based on a **claim attribute** (e.g. claims of a client / city, regardless of assignee) | Cannot be expressed as "user ids"; the resolver must return a *query constraint* instead of ids. Evolve the return type from `int[]|null` to a small value object (`UserIds`, `Unrestricted`, `ClaimConstraint`) and let `scopeVisibleTo` apply it. One-time refactor of ~15 lines; do it only when such a scope is actually requested |
-| **Multiple scopes at once** (`roles` + `external_users`) | Change `scope` to an array (see §14 last paragraph); the resolver returns the union |
+| **Multiple scopes at once** (`roles` + `external_users`) | Nothing: already supported by §3.6 (just list both) |
 | **Recursive team** (my team's team) | Resolver arm with a recursive CTE; add a depth cap and index on `users(supervisor_id)` |
 
 ### Performance of new scopes
@@ -669,7 +756,7 @@ Adding a case is additive: existing users keep their stored value, unknown value
 
 ## 15. Summary
 
-- Store **one** `scope` value on the permission (`onlyme | team | users | roles | all`), with `scope_ids` for `users`/`roles`.
+- Store a `scope` on the permission: one value or a **combination** (`onlyme | team | users | roles | all`), with `scope_ids` for `users`/`roles` (e.g. role 1 **+** users 12, 15).
 - Missing scope = `team` = **exactly today's behavior**; `show_all_claims` still means `all`.
 - Implement as **"build the assignee id list differently"** inside `Claim::scopeVisibleTo`; list, show, update, files, risk and assignment inherit it.
 - Do the **normalizer + int-cast fixes first**, because three consumers assume a list and two cast every value to `int`.
