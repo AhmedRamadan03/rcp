@@ -106,7 +106,7 @@ This means GeneralPermission defines the **available options**, while User Permi
 
 The target `permission_mode` structure is a configuration map.
 
-Permission يدعم Scope:
+A permission that supports Scope:
 
 ```php
 [
@@ -160,7 +160,7 @@ What value was assigned to this user?
 
 # 4. Why Put Allowed Values Inside permission_mode?
 
-because the purpose here is أن يكون تعريف الـ GeneralPermission هو **مصدر الحقيقة للخيارات المسموحة**.
+because the purpose here is for the GeneralPermission definition to be the **source of truth for the allowed options**.
 
 ```php
 'permission_mode' => [
@@ -168,7 +168,7 @@ because the purpose here is أن يكون تعريف الـ GeneralPermission ه
 ]
 ```
 
-تعني:
+This means:
 
 ```text
 scope
