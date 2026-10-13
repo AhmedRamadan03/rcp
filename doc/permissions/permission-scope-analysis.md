@@ -1,1120 +1,306 @@
-# Permission Scope — Analysis & Implementation Design
+# Permission Scope — Architecture & Implementation Analysis
 
-## 1. Purpose
+> Status: design / analysis (no code changed). Reviewed against `main` of `rcp`.
+> This document **replaces** the earlier revisions of the same file. The earlier "additive `custom` scope"
+> idea was dropped in favor of the model requested later: **one scope value per permission**, chosen from
+> `onlyme | team | all | users | roles`.
 
-Add **Scope** to the General Permissions system so a permission is not limited to:
+---
 
-- Does the user have the permission? `granted`
-- Does the action require approval? `with_approve`
+## 1. Goal
 
-It also defines:
-
-- What data visibility range the user has access to? `scope`
-
-Core principle:
+Give a permission a **scope** that decides *whose data* the user can see, independently of *whether* the
+user has the permission.
 
 ```text
-granted       = Authorization
-scope         = Data Visibility
-with_approve  = Approval Workflow
+granted       = Authorization        (may the user use this permission at all?)
+scope         = Data visibility      (whose data does it apply to?)
+with_approve  = Approval workflow    (does the action need a supervisor's approval?)
 ```
 
-Example:
+### 1.1 Scope values (exactly one per permission)
 
-```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "team"
-  }
-}
-```
+| Scope | Data returned | Extra input |
+|-------|---------------|-------------|
+| `onlyme` | **My** data only | – |
+| `team` | **My** data + data of **people who report to me** (`users.supervisor_id = me`) | – |
+| `users` | **My** data + data of the **specific users** selected | `scope_ids` = user ids |
+| `roles` | **My** data + data of **everyone who holds** the selected roles (resolved at query time) | `scope_ids` = role ids |
+| `all` | Everything | – |
+
+"**My data**" is always included, for every scope except `all` (which already includes it).
+
+### 1.2 Out of scope (explicit non-goals)
+
+- Combining several scope types in one grant (e.g. `roles` + `users`). One value per permission keeps the model, UI and validation simple. A later extension is described in §14.
+- Recursive hierarchies (team of my team). `team` stays one level, exactly as today.
+- Changing approval flow, delegation rules, Partner API auth, or per-action policies.
 
 ---
 
+## 2. What exists today (verified in code)
 
-> **Status of this document (reviewed against `main`):** Sections 1–22 describe the general
-> scope design. They were reviewed against the real code and **Section 23 onward** corrects
-> a few assumptions and adds the **custom scope (roles / specific users + own data)** extension,
-> designed for the fewest code changes and the best performance. If a statement in
-> Sections 1–22 conflicts with Sections 23+, Sections 23+ win.
+### 2.1 Permission storage
+
+```text
+GeneralPermission (catalog)  : permission, path, type, permission_mode (array cast)
+        │  PermissionService::create()
+        ▼
+Permission (per user row)    : JSON column per path (claims, claim_status, claims_files, settings,
+                               third_parties, users, permissions, transactions, reports, role,
+                               accounting, dashboard, payments)
+        value per key        : int  OR  {"granted":0|1, "<mode>":0|1}
+```
+
+- `permission_mode` today is a **list of flag names**, e.g. `['with_approve']`.
+- `GeneralPermissionSeeder::run()` does `GeneralPermission::truncate()` and re-creates the catalog on **every deploy**; user `Permission` rows are untouched.
+- Admin seeder grants `granted = 1` (+ `with_approve = 0`) for everything.
+
+### 2.2 Claim visibility today
+
+Single choke point: **`Claim::scopeVisibleTo(Builder $query, User $user)`**.
+
+```text
+if claims.show_all_claims == 1            → return $query (everything)
+assigneeIds = [me] + my subordinates       (users.supervisor_id)
+visible if ANY of:
+  A) claim has an ACTIVE assigning where `to` ∈ assigneeIds
+  B) claim has an ACTIVE assigning to a user who DELEGATED to someone in assigneeIds
+     (delegations: is_active, start_date <= now, end_date null or >= now)
+  C) claim.user_id = me  AND  claim has no active assignee      (created by me, unassigned)
+```
+
+So, **today every user who is not `show_all_claims` already behaves as `team`**. `onlyme`, `users`, `roles` do not exist.
+
+`show_claim` is only an **endpoint gate** (`ClaimPolicy`, ~line 54); it does not filter data.
+
+### 2.3 Who calls `visibleTo` (all inherit any change)
+
+| Caller | Purpose |
+|--------|---------|
+| `ClaimService::list()` (+ `listForCollector/SeniorCollector/ExternalOffice/Law`) | Claim lists |
+| `can_user_access_claim()` → `ClaimPolicy` | show / update / delete / claim files |
+| `AuthorizeFileAccess` middleware | File download authorization |
+| `RiskController` | Risk list / claim risk |
+| `ClaimInfoController` (~line 1358) | "can the assigner see this claim" check on assignment |
+
+### 2.4 Places that do **not** use `visibleTo` (important for impact)
+
+| Place | How it restricts today | Effect of this feature (Phase 1) |
+|-------|------------------------|----------------------------------|
+| `DashboardController` (`checkUserIds`, payments, targets, claims) | Hard-coded **by role id** (SUPER_ADMIN / SUPERVISOR see all, SENIOR_COLLECTOR sees team, others only self) | None |
+| `PaymentTransactionPolicy` (`show_all_transactions`), `DashboardPolicy` (`show_all_executive`) | Boolean all-or-nothing | None |
+| `accountClaimList` / `listExportForAccount` | Account-facing, no user filter | None |
+| Export jobs (`ExportStatusReportClaims`, report jobs) | Receive `claimIds`/filters built by their callers | **Verify per export** that ids come from a `visibleTo` query (see §10, risk R4) |
 
 ---
 
-## 2. Proposed Permission Definition in the Seeder
+## 3. Proposed design
 
-The key question is whether the permission can be defined this way.
+### 3.1 Data model
+
+**Catalog (`GeneralPermission.permission_mode`)** — becomes a *config map* for permissions that support scope, while legacy lists keep working:
 
 ```php
 [
     'permission' => 'show_claim',
     'permission_mode' => [
-        'scope' => ['onlyme', 'all', 'team']
+        'scope' => ['onlyme', 'team', 'users', 'roles', 'all'],   // allowed values = validation source of truth
     ],
     'type' => PermissionEnum::PUBLIC->value,
     'path' => 'claims',
 ],
+// legacy stays as is:
+['permission' => 'send_discharge_letter', 'permission_mode' => ['with_approve'], ...],
 ```
 
-### Answer
-
-**Yes. This is the intended design, with the important note that the current code must update how `permission_mode` is read.**
-
-In this design, `permission_mode` is not just a list of mode names; it becomes a **configuration map**:
-
-```php
-[
-    'scope' => ['onlyme', 'all', 'team'],
-]
-```
-
-This means:
-
-- `scope` = the mode supported by the permission.
-- `['onlyme', 'all', 'team']` = the allowed values for that mode.
-- When the permission is assigned to a user, exactly **one Scope value** is selected.
-
-Example:
-
-```php
-[
-    'permission' => 'show_claim',
-    'permission_mode' => [
-        'scope' => ['onlyme', 'all', 'team'],
-    ],
-    'type' => PermissionEnum::PUBLIC->value,
-    'path' => 'claims',
-],
-```
-
-Then the User Permission becomes:
+**User permission (`permissions.claims` JSON)**:
 
 ```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "team"
-  }
-}
+{ "show_claim": { "granted": 1, "scope": "onlyme" } }
+{ "show_claim": { "granted": 1, "scope": "team"   } }
+{ "show_claim": { "granted": 1, "scope": "all"    } }
+{ "show_claim": { "granted": 1, "scope": "users", "scope_ids": [12, 15, 31] } }
+{ "show_claim": { "granted": 1, "scope": "roles", "scope_ids": [3, 5] } }
 ```
 
-This means GeneralPermission defines the **available options**, while User Permission stores the **actual selected value**.
+`scope_ids` is **one generic key**; its meaning is decided by `scope` (`users` → user ids, `roles` → role ids). It is ignored for the other scopes.
 
----
+### 3.2 Semantics and defaults (the rules that prevent regressions)
 
-# 3. Recommended Design
+1. **No `scope` key** (every existing user) → treated as **`team`** = exactly today's behavior. **No data migration of user rows.**
+2. **`show_all_claims = 1` keeps winning** and is checked first. It is the legacy spelling of `all`. (Cleanup of the duplicate in §12.)
+3. **Present but invalid value / unknown scope** → **fail closed to `onlyme`** (never widen).
+4. `users` / `roles` with **empty `scope_ids`** → behaves as `onlyme` (never `all`).
+5. **"My data"** = rules A, B, C of §2.2 evaluated for `me`, so delegations *to me* and claims *created by me with no active assignee* still count for every scope.
+6. For `users` / `roles` / `team`, the id list is fed into the **same** A and B branches; rule C (created-by) stays **me only** (as for `team` today).
+7. `team` does **not** include subordinates' subordinates. `users`/`roles` do **not** include the selected users' subordinates.
+8. `roles` is resolved **at query time** (`users.role_id IN (...)`, soft-deleted users excluded), so new/changed/removed users take effect on the next request without re-saving permissions.
 
-The target `permission_mode` structure is a configuration map.
+### 3.3 Core idea — why the change is small
 
-A permission that supports Scope:
-
-```php
-[
-    'permission' => 'show_claim',
-    'permission_mode' => [
-        'scope' => ['onlyme', 'all', 'team'],
-    ],
-    'type' => PermissionEnum::PUBLIC->value,
-    'path' => 'claims',
-],
-```
-
-If a permission supports both Scope and Approval:
-
-```php
-[
-    'permission' => 'some_claim_action',
-    'permission_mode' => [
-        'scope' => ['onlyme', 'all', 'team'],
-        'with_approve' => true,
-    ],
-    'type' => PermissionEnum::PUBLIC->value,
-    'path' => 'claims',
-],
-```
-
-The selected scope value is then stored in the User Permission:
-
-```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "team"
-  }
-}
-```
-
-This separates:
+`scopeVisibleTo` already reduces visibility to **one list of user ids** (`$assigneeIds`) used in
+`assignings.to IN (...) AND is_active = 1` and in the delegation branch. Every scope is therefore just a
+*different way to build that list*:
 
 ```text
-GeneralPermission.permission_mode
-        ↓
-What capabilities does this permission support?
+onlyme → [me]
+team   → [me] + subordinates              (today)
+users  → [me] + scope_ids
+roles  → [me] + ids of users whose role_id ∈ scope_ids
+all    → null  (no filter)
+```
 
-User Permission JSON
-        ↓
-What value was assigned to this user?
+The three EXISTS branches, delegation window logic, indexes and pagination stay **untouched**.
+
+### 3.4 Architecture
+
+```text
+ GeneralPermission (catalog)            allowed scopes per permission
+          │
+          ▼
+ PermissionModes::normalize()  ◄── understands legacy list + new map (one place)
+          │
+          ├──► PermissionService::create()   validates/stores scope + scope_ids
+          ├──► GeneralPermissionSeeder       admin defaults
+          └──► PermissionController::index   catalog sent to UI
+
+ User Permission JSON  ──►  VisibilityScope::assigneeIds($user, $perm)   (pure resolver)
+                                    │   returns  null | int[]
+                                    ▼
+                          Claim::scopeVisibleTo()   ← single choke point
+                                    │
+     ┌────────────┬─────────────┬───┴─────────┬──────────────┐
+  list/export   show/update    file access   risk           assign check
+  (ClaimService) (ClaimPolicy)  (middleware)  (RiskCtrl)     (ClaimInfoCtrl)
+```
+
+Request flow for a list:
+
+```text
+GET /claims
+  → Policy: show_claim.granted == 1 ?                      (authorization)
+  → ClaimService::list → Claim::visibleTo($user)
+        show_all_claims == 1 ? → no filter
+        else VisibilityScope::assigneeIds() → ids | null   (visibility)
+        build A/B/C clause with ids
+  → filters, pagination → response
 ```
 
 ---
 
-# 4. Why Put Allowed Values Inside permission_mode?
+## 4. Implementation (exact code changes)
 
-because the purpose here is for the GeneralPermission definition to be the **source of truth for the allowed options**.
+Total: **2 new small classes + 1 enum, 5 small edits, 1 seeder line, tests**. No new tables, no migration of user data, no new endpoints.
 
-```php
-'permission_mode' => [
-    'scope' => ['onlyme', 'all', 'team'],
-]
-```
-
-This means:
-
-```text
-scope
-    ├── onlyme
-    ├── all
-    └── team
-```
-
-User Permission stores only one selected value:
-
-```json
-"scope": "team"
-```
-
-Therefore:
-
-```text
-GeneralPermission
-    → What values are allowed?
-
-User Permission
-    → What value was selected for this user?
-```
-
-This also makes the permission definition the source for validation instead of duplicating the scope list across multiple places.
-
-Example:
-
-```text
-General Permission:
-show_claim
-mode:
-    scope
-
-User A:
-show_claim:
-    granted = 1
-    scope = onlyme
-
-User B:
-show_claim:
-    granted = 1
-    scope = team
-
-User C:
-show_claim:
-    granted = 1
-    scope = all
-```
-
-This allows the same permission to be assigned with different scopes to different users.
-
----
-
-# 5. Allowed Scope Values
-
-The proposed core values are:
-
-```text
-all
-onlyme
-team
-```
-
-## all
-
-The user can access all records allowed by the permission.
-
-Example:
-
-```text
-show_claim + scope=all
-→ all claims
-```
-
-## onlyme
-
-The user can access only records directly associated with them.
-
-Example:
-
-```text
-show_claim + scope=onlyme
-→ claims assigned/owned by current user
-```
-
-**Important:** The definition of "own" must be based on the official relationship in RCP, not on the assumption that any user_id represents the claim owner.
-
-## team
-
-The user can access their own records and records belonging to members of their team.
-
-Before implementation, the exact meaning of `team` must be established from the current domain.
-
-Do not assume that team means supervisor hierarchy until the actual relationships are reviewed:
-
-- User
-- Claim
-- assignee/collector
-- supervisor/team relationships
-
----
-
-# 6. Expected User Permission JSON
-
-Example: `show_claim`
-
-### All
-
-```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "all"
-  }
-}
-```
-
-### Only Me
-
-```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "onlyme"
-  }
-}
-```
-
-### Team
-
-```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "team"
-  }
-}
-```
-
-If the permission also supports approval:
-
-```json
-{
-  "some_action": {
-    "granted": 1,
-    "scope": "team",
-    "with_approve": 1
-  }
-}
-```
-
----
-
-# 7. Core Design Rule
-
-Do not mix:
-
-```text
-Permission capability
-Permission assignment
-Data filtering
-Approval workflow
-```
-
-The model is:
-
-```text
-GeneralPermission
-    └── permission_mode
-            ├── scope
-            └── with_approve
-
-User Permission
-    └── permission
-            ├── granted
-            ├── scope
-            └── with_approve
-```
-
----
-
-# 8. How to Introduce the Feature Without Breaking Changes
-
-The rollout should be incremental.
-
-## Phase 1 — Metadata
-
-Add `scope` to `permission_mode` only for permissions that require data visibility.
-
-Example:
+### 4.1 New: `PermissionScope` enum
 
 ```php
-[
-    'permission' => 'show_claim',
-    'permission_mode' => ['scope'],
-    'type' => PermissionEnum::PUBLIC->value,
-    'path' => 'claims',
-],
-```
+namespace App\Enums;
 
-Do not change the remaining permissions.
-
----
-
-## Phase 2 — Scope Constants / Enum
-
-Do not spread strings such as:
-
-```text
-all
-onlyme
-team
-```
-
-throughout the project.
-
-Prefer a centralized Enum or Constants:
-
-```php
 enum PermissionScope: string
 {
-    case ALL = 'all';
     case ONLY_ME = 'onlyme';
-    case TEAM = 'team';
+    case TEAM    = 'team';
+    case USERS   = 'users';
+    case ROLES   = 'roles';
+    case ALL     = 'all';
+
+    public function needsIds(): bool
+    {
+        return in_array($this, [self::USERS, self::ROLES], true);
+    }
 }
 ```
 
-This keeps validation consistent.
+### 4.2 New: `PermissionModes` normalizer (one place that understands both formats)
 
----
-
-## Phase 3 — Permission Resolver
-
-Create a centralized helper/service responsible for resolving permission configuration.
-
-Conceptual example:
+Needed because three current consumers assume `permission_mode` is a list (§5, R1).
 
 ```php
-$permission = permission_value(
-    'claims',
-    'show_claim',
-    auth()->user()
-);
+namespace App\Support;
 
-$scope = $permission['scope'] ?? null;
-```
-
-Prefer a clear resolver such as:
-
-```text
-PermissionResolver
-    ├── granted()
-    ├── scope()
-    └── requiresApproval()
-```
-
-instead of reading permission JSON directly in Controllers.
-
----
-
-# 9. Applying Scope to Queries
-
-Scope should not be implemented directly in Controllers.
-
-Instead of:
-
-```php
-if ($scope === 'onlyme') {
-    ...
-} elseif ($scope === 'team') {
-    ...
-}
-```
-
-Instead, use a centralized Query/Service layer responsible for applying visibility.
-
-Conceptual example:
-
-```php
-$query = Claim::query();
-
-$query = $claimVisibility->apply(
-    $query,
-    auth()->user(),
-    'show_claim'
-);
-```
-
-The service decides:
-
-```text
-all
-    → no additional ownership restriction
-
-onlyme
-    → filter by current user's ownership/assignment
-
-team
-    → filter by users in current user's team
-```
-
----
-
-# 10. Do Not Rely on Policies Alone
-
-A Policy can verify:
-
-```text
-Can user access this specific claim?
-```
-
-However, list/index endpoints need query-level filtering so unauthorized records are never loaded in the first place.
-
-Rule:
-
-```text
-Index/List
-    → Query-level filtering
-
-Show single record
-    → Query filtering + Policy/authorization
-
-Action
-    → Permission + Policy + business rules
-
-Approval
-    → existing approval workflow
-```
-
----
-
-# 11. Protecting the Show Endpoint
-
-If the user has:
-
-```text
-show_claim = granted
-scope = onlyme
-```
-
-It is not enough to check:
-
-```php
-granted === 1
-```
-
-and then doing:
-
-```php
-Claim::findOrFail($id)
-```
-
-Otherwise, the user could access a claim outside their scope.
-
-The access flow should be:
-
-```text
-Find claim
-    ↓
-Check permission
-    ↓
-Resolve scope
-    ↓
-Check claim belongs to allowed scope
-    ↓
-Return claim
-```
-
-Preferably, enforce this through a constrained query from the beginning.
-
----
-
-# 12. Handling Existing Users
-
-This point is critical to avoid breaking existing behavior.
-
-Existing permissions do not contain `scope`.
-
-Therefore, default behavior must be explicitly defined.
-
-The safest rollout rule is:
-
-```text
-permission does not support scope
-    → current behavior remains unchanged
-```
-
-For a permission that supports scope, such as `show_claim`, an explicit default should be defined during migration/seeding.
-
-Do not use:
-
-```scope = null
-```
-
-and assign different meanings to it across the system.
-
-The default should be explicit and documented.
-
----
-
-# 13. Admin Behavior
-
-Currently, Admin is granted:
-
-```json
-{
-  "granted": 1
-}
-```
-
-The seeder adds:
-
-```json
-"with_approve": 0
-```
-
-for permissions that support approval.
-
-When Scope is introduced, the Admin scope should be explicit.
-
-For example:
-
-```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "all"
-  }
-}
-```
-
-if the business rule is that Super Admin can see everything.
-
-Do not leave scope undefined and rely on an implicit fallback.
-
----
-
-# 14. Validation
-
-When creating or updating a User Permission, reject:
-
-```text
-scope = anything_else
-```
-
-Such as:
-
-```text
-scope = manager
-scope = branch
-scope = random
-```
-
-The allowed values are:
-
-```text
-all
-onlyme
-team
-```
-
-Also verify that the permission itself supports Scope before accepting a scope value.
-
-For example:
-
-```text
-show_claim
-    supports scope
-    ✓ scope=team
-
-create_claim
-    does not support scope
-    ✗ scope=team
-```
-
----
-
-# 15. Backward Compatibility
-
-The change must not alter:
-
-- existing permissions
-- approval workflow
-- Partner API authorization behavior
-- existing role checks
-- business status rules
-
-except for permissions where `scope` is explicitly enabled.
-
-This enables a gradual rollout:
-
-```text
-Phase 1
-    Add scope metadata
-
-Phase 2
-    Add resolver
-
-Phase 3
-    Add visibility filtering
-
-Phase 4
-    Migrate selected permissions
-
-Phase 5
-    Add tests
-
-Phase 6
-    Enable UI configuration
-```
-
----
-
-# 16. Testing Strategy
-
-Every scope must be tested at both query and endpoint level.
-
-## show_claim
-
-### all
-
-The user can see:
-
-```text
-claim A
-claim B
-claim C
-...
-```
-
-### onlyme
-
-The user can see:
-
-```text
-claims assigned to user
-```
-
-The user cannot see:
-
-```text
-claims assigned to another user
-```
-
-### team
-
-The user can see:
-
-```text
-own claims
-+
-team members' claims
-```
-
-The user cannot see:
-
-```text
-claims outside the team
-```
-
----
-
-# 17. Security Rules
-
-Scope must be treated as part of the authorization boundary, not merely a UI filter.
-
-Hiding records in the frontend is not sufficient.
-
-Enforcement must happen in the backend.
-
-That is:
-
-```text
-Frontend filter = UX
-Backend scope enforcement = Security
-```
-
----
-
-# 18. Recommended Final Data Model
-
-## GeneralPermission
-
-```json
-{
-  "permission": "show_claim",
-  "permission_mode": {
-    "scope": ["onlyme", "all", "team"]
-  },
-  "type": "public",
-  "path": "claims"
-}
-```
-
-## User Permission
-
-```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "team"
-  }
-}
-```
-
-## Permission with approval + scope
-
-```json
-{
-  "some_action": {
-    "granted": 1,
-    "scope": "team",
-    "with_approve": 1
-  }
-}
-```
-
----
-
-# 19. Recommended Implementation Order in RCP
-
-Do not modify all Policies and Controllers at once.
-
-Recommended order:
-
-1. Define `PermissionScope` enum.
-2. Update `permission_mode` to the configuration-map structure.
-3. Add `scope` support only to selected permissions.
-4. Extend permission assignment/resolution to support `scope`.
-5. Define the exact meaning of `onlyme`.
-6. Define the exact team relation for `team`.
-7. Build centralized Claim visibility/query logic.
-8. Apply it to claims index/list.
-9. Apply the same rule to single-claim show.
-10. Add Policy consistency checks.
-11. Add feature tests for all scopes.
-12. Only then expose scope selection in the permissions UI.
-
----
-
-# 20. Critical Decision Before Coding
-
-Before implementation, the project must answer one domain question:
-
-### What exactly is "team"?
-
-Possible interpretations:
-
-- claims assigned to users who report to the current supervisor;
-- claims assigned to members of an explicit team relation;
-- claims belonging to the same operational group;
-- another existing RCP relationship.
-
-This must be taken from the actual User/Claim relationships in the code.
-
-**Do not implement `team` based on an assumption.**
-
----
-
-# 21. Final Recommendation
-
-The final recommended design is:
-
-```php
-[
-    'permission' => 'show_claim',
-    'permission_mode' => [
-        'scope' => ['onlyme', 'all', 'team'],
-    ],
-    'type' => PermissionEnum::PUBLIC->value,
-    'path' => 'claims',
-],
-```
-
-For a permission supporting Scope + Approval:
-
-```php
-[
-    'permission' => 'some_claim_action',
-    'permission_mode' => [
-        'scope' => ['onlyme', 'all', 'team'],
-        'with_approve' => true,
-    ],
-    'type' => PermissionEnum::PUBLIC->value,
-    'path' => 'claims',
-],
-```
-
-The User Permission stores the selected value:
-
-```json
-{
-  "show_claim": {
-    "granted": 1,
-    "scope": "team"
-  }
-}
-```
-
-### Why is this the right structure?
-
-GeneralPermission becomes responsible for defining:
-
-- The permission itself.
-- The modes it supports.
-- The allowed values for each mode.
-
-User Permission becomes responsible for:
-
-- Whether the permission is granted
-- Which Scope was selected
-- Whether the action requires approval
-
-### Important implementation note
-
-The current codebase contains permissions using the legacy `permission_mode` format, such as:
-
-```php
-['with_approve']
-```
-
-Therefore, the schema must not be changed without updating the existing consumers.
-
-First, add a centralized **Normalization/Resolver** that understands both the legacy and new structures, then update the seeder and permission resolution incrementally.
-
-This preserves backward compatibility and prevents different parts of the system from interpreting `permission_mode` differently.
-
----
-
-# 22. Target Architecture
-
-
-```text
-                    GeneralPermission
-                           |
-                           v
-                 permission_mode
-                  /              \
-              scope          with_approve
-                |                  |
-                v                  v
-        PermissionScope       Approval Flow
-        all/onlyme/team
-                |
-                v
-        User Permission JSON
-                |
-                v
-        Permission Resolver
-                |
-                v
-       Claim Visibility Layer
-                |
-        +-------+-------+
-        |       |       |
-       all   onlyme   team
-        |       |       |
-        +-------+-------+
-                |
-                v
-        Controller / Policy
-```
-
-This architecture keeps authorization, data visibility, and approval as separate concerns and allows the feature to be introduced incrementally without changing unrelated permissions.
-
----
-
-# 23. Review Findings (document vs. actual code on `main`)
-
-The branch `review/general-permission-policy-flow` contains only this document, so the review
-compares the proposed design with the real code.
-
-| # | Finding | Evidence | Consequence |
-|---|---------|----------|-------------|
-| 1 | The data-visibility switch is **`show_all_claims`**, not `show_claim`. `show_claim` only gates *endpoint access* (`ClaimPolicy` ~line 54). | `Claim::scopeVisibleTo` reads `claims->show_all_claims`. | Examples in Sections 1–22 that put `scope` on `show_claim` should be read as "the claims visibility rule". |
-| 2 | **"What is `team`?" (Section 20) is already answered by the code**: the user + direct subordinates (`users.supervisor_id`, one level) + claims of users who delegated to them (active `delegations` window) + claims they created that have no active assignee. | `scopeVisibleTo`, `User::subordinates()`, `User::delegationsFrom()`. | Current default behavior == `team`. No new definition needed. |
-| 3 | **`onlyme` does not exist today.** A non-`show_all_claims` user always sees subordinates too. | Same method. | `onlyme` would be a *behavior change* for supervisors; keep it as an optional later phase. |
-| 4 | **Single choke point.** All claim visibility goes through `Claim::scopeVisibleTo` (list in `ClaimService`, `RiskController`, `ClaimInfoController` assign check, `AuthorizeFileAccess`, `can_user_access_claim()` used by `ClaimPolicy` for show/update/delete/files). | `grep visibleTo` / `can_user_access_claim`. | The feature can be implemented in **one method**; every consumer inherits it. |
-| 5 | **Three places assume `permission_mode` is a list of flag names** and will break (type error / wrong behavior) if it becomes a map: `PermissionService::create()` (`foreach ($allowed_modes as $mode) $entry[$mode]`), `GeneralPermissionSeeder` admin loop (`in_array('with_approve', $modes)`), and the `GET permissions` response consumed by the frontend (`PermissionController`, returns `permission_mode` raw). | Code above. | Section 21's "normalizer first" rule is mandatory, not optional. |
-| 6 | **Values are forced to integers.** `PermissionService::create()` does `(int) $value[$mode]` and `get_permission_value()` does `(int) $v` for every key. `"team"` or `[3,5]` would silently become `0` / `1`. | Code above. | A non-numeric `scope` and the id lists need explicit handling in both. |
-| 7 | **`wrap_permissions()` flattens `{"granted":1,...}` to `1`** for legacy readers (`safe_json_decode(...)->show_claim == 1`). | `app/helpers.php`. | Good: extra keys (`scope`, `scope_roles`, `scope_users`) do **not** break the ~40 legacy readers. But it also means `scopeVisibleTo` must read the **raw** JSON, not the wrapped object, to see the extra keys. |
-| 8 | `GeneralPermissionSeeder::run()` does `GeneralPermission::truncate()` and re-creates on every deploy. | Seeder. | Catalog changes ship safely with the deploy; **user `Permission` rows are not touched**, so old users have no `scope` key → must default to current behavior (Section 12). |
-| 9 | Admin seeder gives `granted = 1` to everything (and `with_approve = 0`). | Seeder. | Admin keeps working because `show_all_claims` already returns all claims; no `scope` is needed for Admin if `all` stays mapped to `show_all_claims` (see 25.3). |
-| 10 | Section 8 Phase 3 proposes a new `permission_value()` helper. The codebase already has `get_permission_value()` (path, key, user). | `app/helpers.php`. | Extend the existing helper instead of adding a parallel one. |
-
----
-
-# 24. The Feature: Custom Visibility Scope (Roles / Users + My Own Data)
-
-## 24.1 Requirement
-
-For the claims-visibility permission, an admin can grant a user:
-
-- all claims (`all`), or
-- the current default (`team`), or
-- **`custom`**: *own data* **plus** the data of a chosen set of **roles** and/or a chosen set of **specific users**.
-
-Example: collector X sees his own claims + every claim assigned to anyone with role *Collector Supervisor* + claims assigned to users 12 and 15.
-
-## 24.2 Core idea (why this is cheap and fast)
-
-Today `scopeVisibleTo` already reduces visibility to **one list of user ids** (`$assigneeIds` = user + subordinates) and uses it in `assignings.to IN (...) AND is_active = 1` (and in the delegation clause).
-
-So a custom scope is **not a new query shape**. It only means *"add more ids to `$assigneeIds`"*:
-
-```text
-assigneeIds = [ me ] + [ my subordinates ]            -- current behavior (team)
-            + [ users listed in scope_users ]          -- NEW
-            + [ users whose role_id in scope_roles ]   -- NEW
-```
-
-Everything after that line (the three EXISTS branches, delegation, created-by rule, indexes) stays **unchanged**.
-
-## 24.3 Stored shape (User Permission JSON, `claims` column)
-
-```json
-{
-  "show_all_claims": { "granted": 0 },
-  "show_claim": {
-    "granted": 1,
-    "scope": "custom",
-    "scope_roles": [3, 5],
-    "scope_users": [12, 15]
-  }
-}
-```
-
-Rules:
-
-- No `scope` key (every existing user) → `team` (current behavior). **Zero migration of user rows.**
-- `show_all_claims.granted = 1` still wins and returns all claims (checked first, as today).
-- `scope_roles` / `scope_users` are read **only when** `scope = custom`; ignored otherwise.
-- `custom` is **additive** to the current baseline (own + subordinates + delegation + created-by). It never removes anything the user sees today, so it cannot cause a regression for existing flows.
-
-> Where to hang it: the key can live on `show_claim` (as the doc proposes) or on `show_all_claims`. Keep it on **`show_claim`** so that `show_all_claims` keeps its boolean meaning. `show_claim` is currently flat (`{"granted":1}`), so adding keys to it does not affect legacy readers (finding 7).
-
-## 24.4 Catalog (seeder) definition
-
-```php
-[
-    'permission' => 'show_claim',
-    'permission_mode' => [
-        'scope' => ['team', 'custom'],   // 'all' stays driven by show_all_claims; 'onlyme' optional later
-    ],
-    'type' => PermissionEnum::PUBLIC->value,
-    'path' => 'claims',
-],
-```
-
-`permission_mode` is now a map (as proposed in Sections 2 and 21). Legacy entries stay as lists (`['with_approve']`) and are handled by the normalizer in 25.1.
-
----
-
-# 25. Minimal Code Changes (exactly what is touched)
-
-Total: **1 enum, 1 normalizer, 4 small edits, 1 seeder line, tests.** No migration for user data, no new tables, no new endpoints.
-
-## 25.1 `PermissionModes` normalizer (new, ~25 lines)
-
-One place that understands both formats so no consumer interprets `permission_mode` differently:
-
-```php
 final class PermissionModes
 {
     /** @return array{flags: string[], scope: string[]} */
     public static function normalize(array|string|null $mode): array
     {
         if (is_string($mode)) { $mode = json_decode($mode, true); }
-        $mode = $mode ?? [];
+        $mode ??= [];
 
-        // legacy list: ['with_approve']
-        if (array_is_list($mode)) {
+        if (array_is_list($mode)) {                 // legacy: ['with_approve']
             return ['flags' => $mode, 'scope' => []];
         }
 
-        // map: ['scope' => [...], 'with_approve' => true]
-        $scope = $mode['scope'] ?? [];
+        $scope = $mode['scope'] ?? [];              // map: ['scope' => [...], 'with_approve' => true]
         unset($mode['scope']);
+
         return ['flags' => array_keys(array_filter($mode)), 'scope' => $scope];
     }
 }
 ```
 
-## 25.2 `PermissionScope` enum (new)
+### 4.3 New: `VisibilityScope` resolver
 
 ```php
-enum PermissionScope: string
+namespace App\Services\Permissions;
+
+use App\Enums\PermissionScope;
+use App\Models\User;
+
+final class VisibilityScope
 {
-    case TEAM   = 'team';    // current default
-    case CUSTOM = 'custom';  // team + roles/users
-    // case ONLY_ME = 'onlyme';  // optional, later (changes behavior for supervisors)
-}
-```
+    /** @return int[]|null  null = unrestricted (scope all) */
+    public static function assigneeIds(User $user, mixed $perm): ?array
+    {
+        $scope = is_array($perm) ? ($perm['scope'] ?? null) : null;
 
-`all` is intentionally **not** a stored value: it stays `show_all_claims`, so there is one source of truth for "see everything".
+        // legacy users (no key) or feature switched off => today's behavior
+        if ($scope === null || ! config('permissions.scope_enabled', true)) {
+            $scope = PermissionScope::TEAM->value;
+        }
 
-## 25.3 `Claim::scopeVisibleTo` — the only visibility edit
+        $ids = array_values(array_filter(array_map('intval', (array) ($perm['scope_ids'] ?? []))));
 
-Read the raw JSON (the wrapped object loses extra keys — finding 7) and extend `$assigneeIds`:
-
-```php
-// BEFORE: $claimsData = safe_json_decode($user->permission()->first()?->claims);
-$rawClaims   = $user->permission()->first()?->claims ?? [];        // already json-cast array
-$claimsData  = safe_json_decode($rawClaims);                        // same call as before
-$allShow     = custom_policy($user, ($claimsData->show_all_claims ?? 0) == 1);
-if ($allShow) { return $query; }                                    // unchanged
-
-$subordinateIds = $user->subordinates()->pluck('id')->toArray();    // unchanged
-$assigneeIds    = [...$subordinateIds, $user->id];                  // unchanged
-
-// NEW (only when explicitly configured)
-$assigneeIds = array_values(array_unique([
-    ...$assigneeIds,
-    ...self::customScopeUserIds($user, $rawClaims['show_claim'] ?? []),
-]));
-// ...everything below stays exactly as it is
-```
-
-```php
-protected static function customScopeUserIds(User $user, array $perm): array
-{
-    if (($perm['scope'] ?? null) !== PermissionScope::CUSTOM->value) {
-        return [];                                   // default path: no extra query at all
+        return match (PermissionScope::tryFrom((string) $scope)) {
+            PermissionScope::ALL     => null,
+            PermissionScope::ONLY_ME => [$user->id],
+            PermissionScope::TEAM    => [...$user->subordinates()->pluck('id')->all(), $user->id],
+            PermissionScope::USERS   => array_values(array_unique([$user->id, ...$ids])),
+            PermissionScope::ROLES   => $ids === [] ? [$user->id] : array_values(array_unique([
+                $user->id,
+                ...User::query()->whereIn('role_id', $ids)->pluck('id')->all(),   // soft-deleted excluded
+            ])),
+            default                  => [$user->id],   // invalid value => fail closed
+        };
     }
-
-    $userIds = array_map('intval', $perm['scope_users'] ?? []);
-    $roleIds = array_map('intval', $perm['scope_roles'] ?? []);
-
-    $fromRoles = $roleIds
-        ? User::query()->whereIn('role_id', $roleIds)->pluck('id')->all()   // 1 query, soft-deleted excluded
-        : [];
-
-    return [...$userIds, ...$fromRoles];
 }
 ```
 
-Behavior notes:
+### 4.4 Edit: `Claim::scopeVisibleTo` (the only visibility edit)
 
-- **Default users pay nothing**: the `scope !== custom` early return means no extra query and identical SQL to today.
-- Custom users pay **at most one** indexed query (`users.role_id IN (...)`), and only if roles are configured.
-- Because the same `$assigneeIds` feeds the delegation branch, "claims of someone who delegated to a person in my scope" works consistently with `team`.
+Read the **raw** JSON, because `safe_json_decode()` → `wrap_permissions()` flattens `{"granted":1,...}` to `1` and drops `scope` / `scope_ids`.
 
-## 25.4 `PermissionService::create()` — keep the string/array values
+```php
+$rawClaims  = $user->permission()->first()?->claims ?? [];      // json-cast array
+$claimsData = safe_json_decode($rawClaims);                     // unchanged consumer
+$allShow    = custom_policy($user, ($claimsData->show_all_claims ?? 0) == 1);
 
-Replace the `(int)` copy loop with the normalizer, and add the custom keys only for permissions whose catalog declares `scope`:
+if ($allShow) { return $query; }                                // unchanged
+
+// BEFORE:
+//   $subordinateIds = $user->subordinates()->pluck('id')->toArray();
+//   $assigneeIds    = !empty($subordinateIds) ? [...$subordinateIds, $user->id] : [$user->id];
+// AFTER:
+$assigneeIds = VisibilityScope::assigneeIds($user, $rawClaims['show_claim'] ?? null);
+if ($assigneeIds === null) { return $query; }                   // scope = all
+
+// ... rest of the method (A/B/C branches) stays exactly as it is
+```
+
+### 4.5 Edit: `PermissionService::create()`
+
+Replace the `foreach ($allowed_modes as $mode)` blocks with the normalizer, keep flags as ints, and store scope **as a string + id array** (today everything is cast to `(int)`):
 
 ```php
 $modes = PermissionModes::normalize($permission['permission_mode'] ?? null);
@@ -1122,174 +308,265 @@ $modes = PermissionModes::normalize($permission['permission_mode'] ?? null);
 if (is_array($value)) {
     $entry = ['granted' => (int) ($value['granted'] ?? 0)];
 
-    foreach ($modes['flags'] as $flag) {                // with_approve etc. — same as before
-        $entry[$flag] = (int) ($value[$flag] ?? 0);
+    foreach ($modes['flags'] as $flag) {
+        $entry[$flag] = (int) ($value[$flag] ?? 0);               // unchanged behavior
     }
 
-    if ($modes['scope']) {                              // permission supports scope
-        $scope = $value['scope'] ?? 'team';
-        $entry['scope'] = in_array($scope, $modes['scope'], true) ? $scope : 'team';
+    if ($modes['scope']) {                                        // only permissions that declare scope
+        $scope = PermissionScope::tryFrom((string) ($value['scope'] ?? 'team'));
+        $scope = ($scope && in_array($scope->value, $modes['scope'], true)) ? $scope : PermissionScope::TEAM;
 
-        if ($entry['scope'] === 'custom') {
-            $entry['scope_roles'] = self::ids($value['scope_roles'] ?? []);   // int[], unique, capped
-            $entry['scope_users'] = self::ids($value['scope_users'] ?? []);
+        $entry['scope'] = $scope->value;
+        if ($scope->needsIds()) {
+            $entry['scope_ids'] = array_values(array_unique(array_map('intval', (array) ($value['scope_ids'] ?? []))));
         }
     }
     $permissions[$category_key][$key] = $entry;
-}
+} else { /* unchanged */ }
+
+// "not in request" branch: same, using $modes['flags'] only (no scope => team)
 ```
 
-The "not present in request" branch (`granted = 0`) uses the same `flags` list only. Unknown `scope` falls back to `team` (the safe, current behavior) instead of raising on old UI payloads.
+### 4.6 Edit: `PermissionUpdateRequest::withValidator` (existing hook)
 
-## 25.5 `PermissionUpdateRequest` — validate ids
+For any entry that carries `scope`:
 
-Add validation in `withValidator` (existing hook), only for entries that carry `scope`:
-
-```php
-'scope'        → in:team,custom
-'scope_roles'  → array, max:50, each integer exists:roles,id
-'scope_users'  → array, max:200, each integer exists:users,id
+```text
+scope       : required string, in the catalog's allowed list for THAT permission
+scope_ids   : required when scope in (users, roles); array, min 1, max 200 (users) / 50 (roles)
+              each: integer, exists:users,id  (users scope)  |  exists:roles,id  (roles scope)
+scope on a permission whose catalog has no scope mode  → validation error
 ```
 
-Reject `scope_roles` that contain Super Admin if the business does not want a user to see all admin-owned claims (decision in Section 28).
+Optional business rule: forbid the Super Admin role in `roles` scope (§13, D4).
 
-## 25.6 `get_permission_value()` — do not cast non-scalars
+### 4.7 Edit: `get_permission_value()` (helper)
+
+It currently does `(int) $v` for every key; `"roles"` would become `0` and `[3,5]` would become `1`.
 
 ```php
 foreach ($val as $key => $v) {
-    $result[$key] = is_array($v) || (is_string($v) && !is_numeric($v)) ? $v : (int) $v;
+    $result[$key] = (is_array($v) || (is_string($v) && ! is_numeric($v))) ? $v : (int) $v;
 }
 ```
 
-Without this, `scope = "custom"` becomes `0` and the id arrays become `1` for any code that calls `get_permission_value('claims','show_claim',$user)`.
-
-## 25.7 `GeneralPermissionSeeder` admin loop
+### 4.8 Edit: `GeneralPermissionSeeder`
 
 ```php
+// admin loop: was in_array('with_approve', $modes)
 $modes = PermissionModes::normalize($perm->permission_mode);
 if (in_array('with_approve', $modes['flags'], true)) { $value['with_approve'] = 0; }
 ```
 
-Admin gets no `scope` key (stays `team` by default; Admin sees everything anyway through `show_all_claims`).
+and change the `show_claim` catalog entry (§3.1). Admin receives no `scope` key and keeps full visibility through `show_all_claims`.
 
-## 25.8 `PermissionController::index` (response to frontend)
+### 4.9 Edit: `PermissionController::index`
 
-Return the **normalized** structure only for permissions that use the map form, and keep legacy lists untouched, so the existing UI is not broken:
+It returns `permission_mode` raw to the frontend. Keep legacy lists as lists, return the map for scope-enabled permissions. The UI must accept `list | map` (an old UI that ignores `scope` simply never sends it → users stay on `team`).
 
-```json
-{ "permission": "show_claim", "path": "claims", "permission_mode": { "scope": ["team", "custom"] } }
+### 4.10 Config switch (safety)
+
+```php
+// config/permissions.php
+return ['scope_enabled' => env('PERMISSION_SCOPE_ENABLED', true)];
 ```
 
-The UI must treat `permission_mode` as `list | map`. A UI that does not know `scope` simply never sends it → the user stays on `team`.
+With `false`, every user resolves to `team` (legacy) regardless of stored scopes → instant, deploy-free rollback per client.
 
-## 25.9 What is intentionally NOT changed
+### 4.11 What is intentionally NOT changed
 
-- `ClaimPolicy`, `AuthorizeFileAccess`, `can_user_access_claim`, `ClaimService`, `RiskController`, `ClaimInfoController`: they all call `visibleTo` and inherit the feature.
-- `show_all_claims`, delegation logic, created-by rule, approval workflow, Partner API auth.
-- `wrap_permissions()` and the ~40 legacy `->xxx == 1` readers.
-- User `permissions` rows (no data migration).
+`ClaimPolicy`, `AuthorizeFileAccess`, `can_user_access_claim`, `ClaimService`, `RiskController`, `ClaimInfoController` (all inherit via `visibleTo`), `show_all_claims`, delegation logic, created-by rule, approval workflow, Partner API auth, `wrap_permissions()` and the ~40 legacy `->xxx == 1` readers (extra keys do not break them because they are flattened).
 
 ---
 
-# 26. Performance Analysis
+## 5. Impact analysis
 
-## 26.1 Queries per `visibleTo` call
+### 5.1 Behavior impact by user type
 
-| User type | Extra queries vs. today | SQL shape change |
-|-----------|-------------------------|------------------|
-| `show_all_claims = 1` (admin, managers) | 0 | none (returns before building the clause) |
-| Default / `team` (all existing users) | 0 | none — identical SQL |
-| `custom`, users only | 0 | longer `IN (...)` list |
-| `custom`, with roles | +1 (`select id from users where role_id in (...)`) | longer `IN (...)` list |
+| User | Before | After (Phase 1) |
+|------|--------|-----------------|
+| Existing user, no `scope` | team | **team (identical)** |
+| `show_all_claims = 1` (admin/managers) | all | **all (identical)** |
+| Admin seed user | all | all |
+| New: `onlyme` | – | Own claims only. **A supervisor set to `onlyme` stops seeing subordinates' claims** (intended) |
+| New: `users` / `roles` | – | Own + selected people's claims |
 
-## 26.2 Why the SQL stays fast
+### 5.2 Technical impact by component
 
-- Filtering uses `assignings (to, is_active)` — the composite index added in migration `2026_10_04_140005` — plus `assignings (claim_id)` from `2026_10_04_101414`. A larger `IN` list on the leading column keeps using the index (bitmap/index scan); sizes in the tens or low hundreds are not a concern.
-- No per-row work, no N+1: the extension is resolved **once per query**, not per claim.
-- No `JOIN`/`GROUP BY` is added; the result set is still a filtered `claims` query, so pagination/count behave as before.
+| Component | Impact | Notes |
+|-----------|--------|-------|
+| `Claim::scopeVisibleTo` | **Changed** (≈ 8 lines) | single choke point |
+| `PermissionService::create` | **Changed** | normalizer + scope storage |
+| `PermissionUpdateRequest` | **Changed** | validation only |
+| `get_permission_value` | **Changed** (1 line) | stop casting strings/arrays |
+| `GeneralPermissionSeeder` | **Changed** (2 lines) | catalog + admin loop |
+| `PermissionController::index` | Changed (format only) | UI must accept map |
+| Claim list/show/update/delete/files/risk/assign | Inherit | no edit; behavior follows scope |
+| Dashboard / transactions / executive policies | None | still role-based / boolean |
+| Approval flow (`with_approve`) | None | orthogonal |
+| Partner API auth | None | not based on user permission JSON |
+| Legacy permission readers | None | `wrap_permissions` flattens objects |
+| Deploy pipeline | None | seeder truncates catalog only; user rows untouched; per-client (ART/GIG/GGI/MIC) rollout via env switch |
 
-## 26.3 Optional optimizations (add only if measured)
+### 5.3 Frontend impact
 
-1. **Request-level memoization** of `customScopeUserIds()` (static array keyed by user id). `visibleTo` can run several times in one request (list + file access + policy), so this avoids repeating the role query.
-2. **Short cache** (60–300 s) of the resolved id list, keyed by `user_id + permission.updated_at`. Trade-off: a user who changes role may stay visible for the TTL. Prefer memoization alone first; use the cache only for very large roles.
-3. **Index** on `users(role_id)` (Postgres does not index a foreign key automatically; the `users` table is small, so only if the plan shows a seq scan on a large table). If added, follow the existing `CREATE INDEX CONCURRENTLY IF NOT EXISTS` pattern.
-4. **Large role guard**: if a role resolves to thousands of users, switch that branch to a subquery (`whereIn('to', fn($q) => $q->select('id')->from('users')->whereIn('role_id', $roleIds))`) instead of materializing ids. This keeps the same semantics with one SQL statement.
-
-## 26.4 Freshness
-
-Because roles are resolved at query time (no cache by default), changing a user's `role_id`, deactivating or deleting a user is reflected on the next request. This is the main reason to **avoid** caching by default.
-
----
-
-# 27. Compatibility & Safety Matrix
-
-| Existing behavior | Impact |
-|-------------------|--------|
-| Users without `scope` | Unchanged (`team`) |
-| `show_all_claims = 1` | Unchanged (checked first) |
-| Delegation window logic | Unchanged; also applies to ids added by `custom` |
-| Created-by-with-no-active-assignee rule | Unchanged |
-| `ClaimPolicy` show/update/delete/files | Inherit the extended visibility (same as subordinates today) |
-| Legacy `permission_mode: ['with_approve']` | Works through the normalizer |
-| Legacy permission readers (`->xxx == 1`) | Unaffected (`wrap_permissions` flattens) |
-| Old frontend that never sends `scope` | User stays `team`; payload accepted |
-| Seeder truncate on every deploy | Safe; user rows untouched |
-| Per-client deployments (ART/GIG/GGI/MIC) | Same code path; feature is opt-in per user |
-
-Security notes:
-
-- Extended visibility also extends **actions** the user already holds permission for (update, delete, files, assign), because they use `can_user_access_claim()`. This is identical to how subordinates work today. If view-only extension is required, add a flag (`scope_readonly`) and check it in `ClaimPolicy` — this is *not* part of the minimal design.
-- Never trust ids from the client: validate existence and cap list sizes (25.5); always enforce in `scopeVisibleTo`, never in controllers or the frontend (Section 17).
-- Only holders of `update_permissions` can set these fields (existing route authorization).
+1. Permissions screen: for permissions whose `permission_mode` is a map with `scope`, render a scope selector; for `users`/`roles` render a multi-select fed by existing users/roles endpoints.
+2. Payload: `permissions.claims.show_claim = { granted: 1, scope: "roles", scope_ids: [3,5] }`.
+3. Must tolerate extra keys in the user-permission response and `permission_mode` as list **or** map. **Old UI keeps working** (no scope sent → `team`).
 
 ---
 
-# 28. Decisions Needed Before Coding
+## 6. Performance analysis
 
-1. **Include subordinates in `custom`?** Recommended: **yes** (additive, zero regression). If the business wants "own + selected only", add `include_team: false` later (equivalent to the optional `onlyme` phase).
-2. **Should roles resolve to users dynamically?** Recommended: **yes** (query time). New users added to the role become visible automatically; the alternative (storing user ids) would need re-saving permissions.
-3. **View-only vs. full actions** on the extended claims (see security notes). Recommended default: same as `team`.
-4. **Forbidden roles** (e.g. Super Admin) in `scope_roles`.
-5. Whether the same scope should later apply to **exports/reports/dashboard**; they currently use their own rules (`show_all_executive`, `show_all_transactions`). Out of scope for this change.
+### 6.1 Extra queries per `visibleTo` call
+
+| Scope | Extra work vs. today |
+|-------|----------------------|
+| no scope / `team` | **0** (same subordinates query as today) |
+| `onlyme` | **−1** (skips the subordinates query) |
+| `users` | **0** (ids come from the already-loaded permission JSON) |
+| `roles` | **+1** (`select id from users where role_id in (...)`) |
+| `all` | **−1 or more** (returns before building the clause) |
+
+### 6.2 SQL stays fast
+
+- Filtering keeps using `assignings (to, is_active)` (migration `2026_10_04_140005`) and `assignings (claim_id)` (`2026_10_04_101414`). A longer `IN` on the leading column is fine for tens/hundreds of ids.
+- No per-row work, no N+1, no new JOIN/GROUP BY; pagination and counts behave as before.
+- `scope_ids` for `users` is capped (200) by validation, so the `IN` list is bounded.
+
+### 6.3 Optional optimizations (only if measured)
+
+1. **Per-request memoization** of `assigneeIds()` using a *scoped* container binding (**not** a `static` array: queue workers and Octane live across requests/jobs and would serve stale team/role membership).
+2. `permission()->first()` is a fresh query on each call; reuse the already loaded `$user->permission` relation/`firstPermission` where available.
+3. **Large role guard**: if a role resolves to thousands of users, switch that branch to a sub-select (`whereIn('to', fn ($q) => $q->select('id')->from('users')->whereIn('role_id', $roleIds)->whereNull('deleted_at'))`) — same semantics, one SQL statement.
+4. Index on `users(role_id)` (Postgres does not index FKs automatically). Only if the plan shows a seq scan; use the repo's `CREATE INDEX CONCURRENTLY IF NOT EXISTS` pattern.
+5. **No cross-request cache by default** — it would delay role/user changes. Add only for very large roles, with a short TTL.
 
 ---
 
-# 29. Tests to Add
+## 7. Security model
 
-Extend `tests/Unit/ClaimServiceListVisibilityTest.php` (it already builds users/assignings/delegations in an in-memory DB):
+- Scope is an **authorization boundary** enforced in `scopeVisibleTo`, never in controllers or the frontend.
+- Single-record endpoints are protected by the same rule through `can_user_access_claim()` → consistent `403`.
+- **Fail closed** on invalid/empty configuration (§3.2 rules 3–4).
+- Ids are validated for existence and capped; unknown scopes are rejected at write time.
+- Extended visibility also extends **actions** the user already holds permission for (update, delete, assign, files), exactly as `team` does today for subordinates. If view-only extension is required it needs a separate flag (not part of the minimal design).
+- Granting wider scope than your own is an existing capability (`update_permissions` holders can already grant `show_all_claims`); not changed here.
+
+---
+
+## 8. Edge cases
+
+| Case | Behavior |
+|------|----------|
+| `users`/`roles` with empty `scope_ids` | `onlyme` |
+| `scope_ids` contains my own id | de-duplicated |
+| Selected user soft-deleted | their claims remain visible only if still actively assigned to that id; role-resolved lists exclude deleted users automatically |
+| User changes role | `roles` scopes reflect it on next request |
+| Role deleted | `exists` validation prevents new use; an orphan id matches no users |
+| Selected user delegated to a third person | covered by branch B (same as team) |
+| Selected user's subordinates | **not** included (no recursion) |
+| `show_all_claims = 1` and `scope = onlyme` | `all` (legacy flag wins; clean up per §12) |
+| Claim created by a selected user with no active assignee | **not** visible (rule C is "me only", same as `team`) |
+| Delegation *to me* with `onlyme` | visible (part of "my data") |
+
+---
+
+## 9. Testing strategy
+
+Extend `tests/Unit/ClaimServiceListVisibilityTest.php` (already builds users/assignings/delegations on in-memory DB), plus feature tests.
 
 | Case | Expectation |
 |------|-------------|
-| No `scope` key | Same result as today (regression guard) |
-| `scope = custom`, `scope_users = [B]` | sees own + subordinates + B's claims, not C's |
-| `scope = custom`, `scope_roles = [R]` | sees own + every active user with role R |
-| User with role R soft-deleted / role changed | no longer visible on next call |
-| Inactive assignment (`is_active = 0`) of a scoped user | not visible |
-| Delegation from a scoped user | visible (same as team) |
-| `show_all_claims = 1` + custom keys | all claims (custom ignored) |
-| `scope` unknown value through `PermissionService::create` | stored as `team` |
-| Legacy `permission_mode: ['with_approve']` through `create()` and the seeder | identical output to before |
-| `get_permission_value('claims','show_claim',$u)` with custom scope | returns `scope` string and id arrays, not ints |
-| `can_user_access_claim()` / `AuthorizeFileAccess` for a claim of a scoped user | allowed; for outside claim → 403 |
-| Query count assertion | default user: no extra queries; custom with roles: +1 |
+| No `scope` key | identical to current results (**regression guard**) |
+| `onlyme` | own (A/B/C) only; **not** subordinates' |
+| `team` | own + subordinates' (today) |
+| `users=[B]` | own + B's; not C's |
+| `roles=[R]` | own + all active users with role R; role change/soft-delete reflected |
+| `all` via scope | no filter |
+| `show_all_claims=1` + any scope | all |
+| Empty `scope_ids` / invalid scope stored | `onlyme` (fail closed) |
+| Inactive assigning (`is_active=0`) of a scoped user | not visible |
+| Delegation to me / from a scoped user | visible |
+| `can_user_access_claim()`, `AuthorizeFileAccess` | allowed in scope, `403` outside |
+| `PermissionService::create` | stores string scope + int ids; unknown scope → `team`; scope on non-scope permission ignored/rejected |
+| Legacy `permission_mode: ['with_approve']` through `create()` and seeder | output identical to before |
+| `get_permission_value()` with scope | returns string + array, not ints |
+| Query count | `team`: same as before; `users`: no extra; `roles`: +1 |
+| `PERMISSION_SCOPE_ENABLED=false` | everyone resolves to `team` |
 
 ---
 
-# 30. Rollout Plan (smallest safe steps)
+## 10. Risks & mitigations
 
-1. Add `PermissionModes` + `PermissionScope`; switch `PermissionService`, the seeder loop and `PermissionController` to the normalizer (**no behavior change**, legacy lists only). Ship and verify.
-2. Fix `get_permission_value()` casting (**no behavior change**).
-3. Add `customScopeUserIds()` and the `$assigneeIds` merge in `scopeVisibleTo` (dormant: nobody has `scope = custom`). Add tests.
-4. Change the `show_claim` seeder entry to the map form and add request validation (`scope`, `scope_roles`, `scope_users`).
-5. Update the permissions UI to show the scope selector and the role/user pickers (frontend can lag behind: old UI keeps working).
-6. Enable per user from the permissions screen, measure query timings, then consider 26.3 optimizations only if needed.
+| ID | Risk | Mitigation |
+|----|------|------------|
+| R1 | `permission_mode` becomes a map and 3 list-assuming consumers break | Ship `PermissionModes` first (Phase 1), switch all consumers before changing the catalog |
+| R2 | Values cast to `int` silently turn `"roles"` / `[3,5]` into `0` / `1` | Fix `PermissionService` and `get_permission_value` in the same release; tests in §9 |
+| R3 | `wrap_permissions()` hides `scope` from normal readers | Read the **raw** JSON in `scopeVisibleTo` |
+| R4 | A user restricted to `onlyme` still sees data through paths that don't use `visibleTo` (exports, some reports, dashboards) | Audit each export/report: the claim ids must come from a `visibleTo` query; list findings before enabling `onlyme/users/roles` for real users |
+| R5 | Supervisors moved to `onlyme` lose access to subordinates (surprising) | UI help text; this is the definition of `onlyme` |
+| R6 | Long-lived workers + static memoization → stale visibility | Use scoped binding, not statics |
+| R7 | Seeder truncates catalog on each deploy while code and seeder versions differ across the 3 UAT deployments | Seeder and code ship in the same artifact; normalizer understands both formats |
+| R8 | Large `IN` lists | Caps + sub-select fallback (§6.3) |
 
 ---
 
-# 31. Final Recommendation (summary)
+## 11. Rollout plan (each step is independently shippable)
 
-- Keep `show_all_claims` as the **"all"** switch and keep today's behavior as **`team`**.
-- Add **one** new scope value, **`custom`**, with `scope_roles` and `scope_users`, stored beside `granted` in the existing `show_claim` JSON.
-- Implement it as **"add ids to `$assigneeIds`"** inside `Claim::scopeVisibleTo`, the single choke point; every list, show, update, file and assign path inherits it with no further edits.
-- Make `permission_mode` map-aware through **one normalizer** first, because three current consumers assume a list and two cast every value to `int`.
-- Performance cost: **0 extra queries** for every existing user and **at most 1 indexed query** for custom users with roles; no new tables, no data migration.
+1. **Foundation, no behavior change:** add `PermissionModes`, switch `PermissionService`, seeder admin loop, `PermissionController` to it; fix `get_permission_value`. Catalog still legacy lists.
+2. **Resolver dormant:** add `PermissionScope`, `VisibilityScope`, edit `scopeVisibleTo`, add config switch. Nobody has `scope` ⇒ everyone is `team` ⇒ identical SQL. Add tests (§9). Run the existing visibility test suite.
+3. **Catalog + validation:** change the `show_claim` seeder entry to the map form; add request validation.
+4. **Audit exports/reports** (R4) and fix any path that bypasses `visibleTo`.
+5. **UI:** scope selector + user/role pickers.
+6. **Enable per user** from the permissions screen; monitor timings; apply §6.3 only if needed.
+7. **Cleanup (optional):** migrate `show_all_claims = 1` → `scope = all`, hide the old checkbox (§12).
+
+**Rollback:** set `PERMISSION_SCOPE_ENABLED=false` (everyone → `team`). Stored `scope` keys are inert; no data to revert.
+
+---
+
+## 12. The legacy `show_all_claims` duplicate
+
+`show_all_claims` and `scope = all` mean the same thing. Phase 1 keeps both (legacy flag has priority) to avoid touching existing users. Later, a one-off migration can set `scope = all` where `show_all_claims = 1`, hide the old checkbox, and finally remove the flag; until then the UI should show only the scope selector for claims visibility so admins have one control.
+
+---
+
+## 13. Decisions needed before coding
+
+| # | Decision | Recommendation |
+|---|----------|----------------|
+| D1 | Which permission carries the scope? | `show_claim` (keeps `show_all_claims` boolean untouched) |
+| D2 | Should `users`/`roles`/`team` include *my own* data? | **Yes** (as requested) |
+| D3 | Do actions (update/delete/assign/files) extend with the visibility? | Yes, same as `team` today; add a view-only flag later only if the business needs it |
+| D4 | Roles that must not be selectable (e.g. Super Admin)? | Block in validation |
+| D5 | Should `team` stay one level? | Yes |
+| D6 | Apply scope to other permissions (transactions, reports, dashboard, users list) in this release? | **No** — claims only; see §14 |
+
+---
+
+## 14. Extending beyond claims (later, no engine change)
+
+The resolver returns a **list of user ids** (or `null` = all). Each data domain only needs to map that list to its own column:
+
+| Domain | Mapping |
+|--------|---------|
+| Claims | `assignings.to IN ids` (done in Phase 1) |
+| Payment transactions / dashboard payments | `payment.claim.assignees.to IN ids` |
+| Targets | `targets.user_id IN ids` |
+| Users list | `users.id IN ids` |
+
+Enabling another permission = add `'permission_mode' => ['scope' => [...]]` in the seeder + one `->whereIn(...)` using `VisibilityScope::assigneeIds()`. The hard-coded role logic in `DashboardController::checkUserIds` is the natural first candidate, but it is intentionally **not** touched now.
+
+If a later requirement needs combinations (e.g. `roles` + `users`), the shape can evolve to `"scope": ["roles","users"], "scope_ids": {"roles":[3], "users":[12]}`; the resolver then returns the union. Not needed now.
+
+---
+
+## 15. Summary
+
+- Store **one** `scope` value on the permission (`onlyme | team | users | roles | all`), with `scope_ids` for `users`/`roles`.
+- Missing scope = `team` = **exactly today's behavior**; `show_all_claims` still means `all`.
+- Implement as **"build the assignee id list differently"** inside `Claim::scopeVisibleTo`; list, show, update, files, risk and assignment inherit it.
+- Do the **normalizer + int-cast fixes first**, because three consumers assume a list and two cast every value to `int`.
+- Cost: **no extra queries for existing users**, at most **+1 indexed query** for `roles`, no new tables, no data migration, and an env switch for instant rollback.
+- The one real exposure to audit before enabling restricted scopes: **exports/reports/dashboard paths that do not use `visibleTo`** (R4).
