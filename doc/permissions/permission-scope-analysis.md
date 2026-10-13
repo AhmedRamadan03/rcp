@@ -562,6 +562,111 @@ If a later requirement needs combinations (e.g. `roles` + `users`), the shape ca
 
 ---
 
+## 14.1 Adding a new scope later (e.g. `external_users`) — how easy is it?
+
+**Easy: one enum case + one resolver branch (+ a validation rule).** Nothing in `scopeVisibleTo`, the policies, the
+queries or the stored JSON shape changes, because every scope only has to answer one question:
+
+> "Which user ids does this scope add to *my* data?"
+
+### Does a new scope need `ids`?
+
+**It depends on the scope; each scope declares it.** Three kinds exist:
+
+| Kind | Needs `scope_ids`? | `scope_ids` meaning | Example |
+|------|--------------------|---------------------|---------|
+| none | No | – | `onlyme`, `team`, `all`, **`external_users`** (all users with `user_type = EXTERNAL_USER`) |
+| ids | Yes | ids of some entity | `users` (user ids), `roles` (role ids), `clients` (client ids), `departments` |
+| ids (optional) | Optional | narrows the set | `external_users` with `scope_ids = [41, 42]` → only those external users |
+
+For `external_users` the codebase already has what is needed: `users.user_type` with `UserType::INTERNAL_USER / EXTERNAL_USER`
+(used in user create/edit validation and in imports). So the resolver is one query:
+
+```php
+PermissionScope::EXTERNAL_USERS => [
+    $user->id,
+    ...User::query()
+        ->where('user_type', UserType::EXTERNAL_USER->value)
+        ->when($ids, fn ($q) => $q->whereIn('id', $ids))      // optional narrowing
+        ->pluck('id')->all(),
+],
+```
+
+### Steps to add any new scope (checklist)
+
+| # | Where | Change | Size |
+|---|-------|--------|------|
+| 1 | `PermissionScope` enum | add `case EXTERNAL_USERS = 'external_users';` and its id rule (`none` / `required` / `optional`, and which table the ids belong to) | 2 lines |
+| 2 | `VisibilityScope::assigneeIds()` | add one `match` arm returning the user ids | 5–8 lines |
+| 3 | Catalog (seeder) | add the value to the permission's allowed list: `'scope' => [..., 'external_users']` | 1 line |
+| 4 | `PermissionUpdateRequest` | nothing if the rule lives in the enum (§ below); otherwise one rule | 0–3 lines |
+| 5 | Frontend | add the option to the selector (+ picker if it takes ids) | UI only |
+| 6 | Tests | one case in the visibility test | 1 test |
+
+**Not touched:** `Claim::scopeVisibleTo`, policies, file-access middleware, `PermissionService`, JSON storage, migrations, seeded user rows.
+
+### Make it even cheaper: put the rules on the enum (recommended in Phase 1)
+
+Instead of scattering `if ($scope === 'roles')` across the validator, service and UI payload, let the enum describe itself, so the
+validator, the service and the catalog API all read the same metadata:
+
+```php
+enum PermissionScope: string
+{
+    case ONLY_ME        = 'onlyme';
+    case TEAM           = 'team';
+    case USERS          = 'users';
+    case ROLES          = 'roles';
+    case EXTERNAL_USERS = 'external_users';
+    case ALL            = 'all';
+
+    /** none | required | optional */
+    public function ids(): string
+    {
+        return match ($this) {
+            self::USERS, self::ROLES => 'required',
+            self::EXTERNAL_USERS     => 'optional',
+            default                  => 'none',
+        };
+    }
+
+    /** table used to validate ids (null when no ids) */
+    public function idsTable(): ?string
+    {
+        return match ($this) {
+            self::USERS, self::EXTERNAL_USERS => 'users',
+            self::ROLES                       => 'roles',
+            default                           => null,
+        };
+    }
+}
+```
+
+`PermissionService` stores `scope_ids` whenever `ids() !== 'none'`; `PermissionUpdateRequest` validates `scope_ids`
+against `idsTable()`; the resolver stays the only place with business logic. A new scope = enum case + resolver arm.
+
+### Cases that need a bit more than the checklist
+
+| New scope | Extra work |
+|-----------|-----------|
+| Based on a **user attribute** (`user_type`, `client_id`, `role_id`, `supervisor_id`) | Resolver arm only |
+| Based on a **claim attribute** (e.g. claims of a client / city, regardless of assignee) | Cannot be expressed as "user ids"; the resolver must return a *query constraint* instead of ids. Evolve the return type from `int[]|null` to a small value object (`UserIds`, `Unrestricted`, `ClaimConstraint`) and let `scopeVisibleTo` apply it. One-time refactor of ~15 lines; do it only when such a scope is actually requested |
+| **Multiple scopes at once** (`roles` + `external_users`) | Change `scope` to an array (see §14 last paragraph); the resolver returns the union |
+| **Recursive team** (my team's team) | Resolver arm with a recursive CTE; add a depth cap and index on `users(supervisor_id)` |
+
+### Performance of new scopes
+
+A scope that resolves to a user-id list costs **at most one indexed query** (like `roles`) and reuses the same
+`assignings (to, is_active)` filter. For big sets (e.g. all external users in a large deployment) use the sub-select
+form from §6.3 so no id list is materialized in PHP.
+
+### Compatibility of new scopes
+
+Adding a case is additive: existing users keep their stored value, unknown values still **fail closed** to `onlyme`, and with
+`PERMISSION_SCOPE_ENABLED=false` everything falls back to `team`. Releasing a new scope never changes what existing users see.
+
+---
+
 ## 15. Summary
 
 - Store **one** `scope` value on the permission (`onlyme | team | users | roles | all`), with `scope_ids` for `users`/`roles`.
